@@ -19,7 +19,6 @@ app.post('/api/pces/antecedentes', async (req, res) => {
     dataNascimento 
   } = req.body;
 
-  // Validação dos campos obrigatórios da SESP/PCES
   if (!rg || !nome || !nomeMae || !dataNascimento) {
     return res.status(400).json({ 
       error: 'Campos obrigatórios ausentes: rg, nome, nomeMae e dataNascimento são exigidos.' 
@@ -52,20 +51,16 @@ app.post('/api/pces/antecedentes', async (req, res) => {
 
     const page = await browser.newPage();
 
-    // User-Agent real para evitar bloqueios de automação
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
 
-    // 1. Navega até o portal oficial da SESP/PCES (JSF)
     await page.goto('https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf', {
       waitUntil: 'networkidle2',
       timeout: 35000
     });
 
-    // 2. Preenche os campos do formulário JSF
-    
-    // Tipo de Documento (*Documento)
+    // 1. Tipo de Documento
     await page.evaluate((type) => {
       const selectDoc = document.querySelector('select[id*="tipoDoc"], select[id*="Documento"], select[name*="Documento"]');
       if (selectDoc) {
@@ -74,11 +69,11 @@ app.post('/api/pces/antecedentes', async (req, res) => {
       }
     }, docType).catch(() => {});
 
-    // Número do Documento (*Nº)
+    // 2. Número do RG
     await page.waitForSelector('input[id*="numDoc"], input[id*="rg"], input[id*="Num"]', { timeout: 10000 });
     await page.type('input[id*="numDoc"], input[id*="rg"], input[id*="Num"]', cleanRg);
 
-    // UF Emissora (*UF) - Seleção Dinâmica
+    // 3. UF Emissora
     await page.evaluate((targetUf) => {
       const selectUf = document.querySelector('select[id*="ufDoc"], select[id*="uf"], select[name*="uf"]');
       if (selectUf) {
@@ -87,41 +82,59 @@ app.post('/api/pces/antecedentes', async (req, res) => {
       }
     }, selectedUf).catch(() => {});
 
-    // Nome Completo (*Nome)
+    // 4. Nome Completo
     await page.type('input[id*="nomePessoa"], input[id*="nome"]', cleanNome);
 
-    // Nome do Pai (*Pai)
+    // 5. Nome do Pai
     await page.type('input[id*="nomePai"], input[id*="pai"]', cleanPai);
 
-    // Nome da Mãe (*Mãe)
+    // 6. Nome da Mãe
     await page.type('input[id*="nomeMae"], input[id*="mae"]', cleanMae);
 
-    // Data de Nascimento (*Nascimento - Formato DD/MM/AAAA)
+    // 7. Data de Nascimento (DD/MM/AAAA)
     await page.type('input[id*="dtNasc"], input[id*="dataNasc"], input[id*="nascimento"]', dataNascimento);
 
-    // 3. Submete o formulário JSF
+    // Submete o formulário JSF
     await Promise.all([
       page.click('input[type="submit"], button[type="submit"], input[value*="Emitir"]'),
       page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 35000 }).catch(() => {})
     ]);
 
-    // 4. Analisa o resultado na página
+    // Análise rigorosa do conteúdo retornado pela SESP
     const content = await page.content();
     const contentUpper = content.toUpperCase();
 
-    const temApontamento = (contentUpper.includes('CONSTA') || contentUpper.includes('REGISTRO')) && !contentUpper.includes('NADA CONSTA');
-    const nadaConsta = contentUpper.includes('NADA CONSTA') || contentUpper.includes('ATESTAMOS QUE');
+    // Apenas considera "NADA CONSTA" se o atestado for efetivamente gerado/emitido
+    const emissaoExitosa = contentUpper.includes('NADA CONSTA') || contentUpper.includes('ATESTAMOS QUE');
 
-    return res.json({
-      fonte: 'SESP_PCES',
-      rg: cleanRg,
-      uf: selectedUf,
-      nome: cleanNome,
-      sucesso: true,
-      hasRecords: temApontamento,
-      statusTexto: nadaConsta ? 'NADA CONSTA' : (temApontamento ? 'APONTAMENTO ENCONTRADO' : 'CONSULTA REALIZADA'),
-      executedAt: new Date().toISOString()
-    });
+    if (emissaoExitosa) {
+      return res.json({
+        fonte: 'SESP_PCES',
+        rg: cleanRg,
+        uf: selectedUf,
+        nome: cleanNome,
+        sucesso: true,
+        hasRecords: false,
+        riskLevel: 'LOW',
+        statusTexto: 'NADA CONSTA',
+        mensagem: 'Certidão negativa emitida com sucesso.',
+        executedAt: new Date().toISOString()
+      });
+    } else {
+      // Caso haja qualquer impedimento, mensagem de comparecimento ou apontamento
+      return res.json({
+        fonte: 'SESP_PCES',
+        rg: cleanRg,
+        uf: selectedUf,
+        nome: cleanNome,
+        sucesso: true,
+        hasRecords: true,
+        riskLevel: 'MEDIUM', // Alerta de atenção para análise do RH
+        statusTexto: 'NÃO FOI POSSÍVEL EMITIR CERTIDÃO NEGATIVA',
+        mensagem: 'Solicitado envio de documentos ou comparecimento ao setor responsável da Polícia Civil.',
+        executedAt: new Date().toISOString()
+      });
+    }
 
   } catch (error) {
     console.error('Erro na automação da SESP-ES:', error.message);
@@ -129,7 +142,10 @@ app.post('/api/pces/antecedentes', async (req, res) => {
     return res.status(500).json({
       fonte: 'SESP_PCES',
       sucesso: false,
-      error: 'O portal da SESP-ES demorou para responder ou rejeitou os dados fornecidos.',
+      hasRecords: true,
+      riskLevel: 'HIGH',
+      statusTexto: 'NÃO FOI POSSÍVEL EMITIR CERTIDÃO NEGATIVA',
+      error: 'O portal da SESP-ES demorou para responder ou impediu a emissão.',
       details: error.message
     });
   } finally {
