@@ -97,8 +97,7 @@ app.post('/api/pces/antecedentes', async (req, res) => {
     const content = await page.content();
     const contentUpper = content.toUpperCase();
 
-    // REGRA DE OURO DE VALIDAÇÃO:
-    // Confirmação EXATA da certidão negativa emitida
+    // Validação estrita do Atestado Negativo Emitido
     const atestadoEmitidoComSucesso = 
       contentUpper.includes('NADA CONSTA CONTRA') || 
       (contentUpper.includes('ATESTO QUE') && contentUpper.includes('NADA CONSTA'));
@@ -113,11 +112,11 @@ app.post('/api/pces/antecedentes', async (req, res) => {
         hasRecords: false,
         riskLevel: 'LOW',
         statusTexto: 'NADA CONSTA',
-        mensagem: 'Certidão negativa emitida com sucesso pela Polícia Científica do ES.',
+        mensagem: 'Certidão negativa emitida com sucesso.',
         executedAt: new Date().toISOString()
       });
     } else {
-      // Qualquer outro cenário (instrução de e-mail atestado@pci.es.gov.br, comparecimento ou impedimento)
+      // Retorno focado em Alerta de Risco para o RH
       return res.json({
         fonte: 'SESP_PCES',
         rg: cleanRg,
@@ -125,9 +124,9 @@ app.post('/api/pces/antecedentes', async (req, res) => {
         nome: cleanNome,
         sucesso: true,
         hasRecords: true,
-        riskLevel: 'MEDIUM',
+        riskLevel: 'HIGH',
         statusTexto: 'NÃO FOI POSSÍVEL EMITIR CERTIDÃO NEGATIVA',
-        mensagem: 'O portal não emitiu o atestado automaticamente. Solicitado envio de documento de identificação para atestado@pci.es.gov.br (DEPCRIM).',
+        mensagem: 'ATENÇÃO: Possível apontamento ou pendência cadastral registrada na Polícia Civil. Recomendada validação minuciosa.',
         executedAt: new Date().toISOString()
       });
     }
