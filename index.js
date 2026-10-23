@@ -1,6 +1,18 @@
+import express from 'express';
+import cors from 'cors';
 import puppeteer from 'puppeteer';
 
-export async function consultarAntecedentesPCES(dados) {
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Rota de teste simples (Health Check)
+app.get('/', (req, res) => {
+  res.json({ status: 'online', service: 'pces-scraper' });
+});
+
+// Função de Scraping no Portal PrimeFaces da PCES / SESP-ES
+async function consultarAntecedentesPCES(dados) {
   const URL_ALVO = 'https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf';
   
   const browser = await puppeteer.launch({
@@ -17,69 +29,70 @@ export async function consultarAntecedentesPCES(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
     
-    // 1. Acessa a página oficial
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 30000 });
+    console.log(`[PCES] Acessando portal oficial para: ${dados.nome}`);
+    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
 
-    // 2. Seleciona o tipo de documento no PrimeFaces (1 = RG, 7 = CNH, 12 = CIN)
-    let tipoDocValue = "1"; // Default RG
+    // 1. Tipo de documento no PrimeFaces (1 = RG, 7 = CNH, 12 = CIN)
+    let tipoDocValue = "1";
     if (dados.tipoDocumento === 'CNH') tipoDocValue = "7";
     if (dados.tipoDocumento === 'CIN') tipoDocValue = "12";
 
-    await page.waitForSelector('#j_idt57_input');
+    await page.waitForSelector('#j_idt57_input', { timeout: 10000 });
     await page.select('#j_idt57_input', tipoDocValue);
     
-    // Dispara o evento de change do PrimeFaces para atualizar a tela
+    // Dispara o change para o PrimeFaces reconhecer o documento
     await page.evaluate(() => {
       const select = document.getElementById('j_idt57_input');
       select.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await new Promise(r => setTimeout(r, 600));
 
-    // 3. Preenchimento do Número do Documento
+    // 2. Número do Documento (somente números)
     await page.waitForSelector('#numero');
     await page.focus('#numero');
     const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
     await page.keyboard.type(docLimpo, { delay: 40 });
 
-    // 4. Nome Completo do Candidato
+    // 3. Nome Completo
     await page.waitForSelector('#nomeIndividuo');
     await page.focus('#nomeIndividuo');
     await page.keyboard.type(dados.nome.toUpperCase().trim(), { delay: 30 });
 
-    // 5. Nome do Pai (Opcional - deixar em branco se não houver)
+    // 4. Nome do Pai (deixa vazio se não houver)
     if (dados.nomePai && dados.nomePai.trim() !== '' && dados.nomePai.toUpperCase() !== 'NÃO DECLARADO') {
       await page.waitForSelector('#nomePai');
       await page.focus('#nomePai');
       await page.keyboard.type(dados.nomePai.toUpperCase().trim(), { delay: 30 });
     }
 
-    // 6. Nome da Mãe
+    // 5. Nome da Mãe
     if (dados.nomeMae && dados.nomeMae.trim() !== '') {
       await page.waitForSelector('#nomeMae');
       await page.focus('#nomeMae');
       await page.keyboard.type(dados.nomeMae.toUpperCase().trim(), { delay: 30 });
     }
 
-    // 7. Data de Nascimento (Formato DD/MM/AAAA)
+    // 6. Data de Nascimento (DD/MM/AAAA)
     await page.waitForSelector('#dtNascimento_input');
     await page.focus('#dtNascimento_input');
-    let dataFormatada = dados.dataNascimento;
+    let dataFormatada = dados.dataNascimento || '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
     await page.keyboard.type(dataFormatada, { delay: 40 });
 
-    // Prepara a escuta para a NOVA ABA (onde o Atestado é gerado)
+    // Prepara a escuta para a NOVA ABA (onde a certidão é renderizada)
     const newPagePromise = new Promise(resolve => 
       browser.once('targetcreated', target => resolve(target.page()))
     );
 
-    // 8. Clica no botão Emitir Atestado
+    // 7. Clica em Emitir Atestado
+    console.log('[PCES] Clicando no botão Emitir Atestado...');
     await page.waitForSelector('#btnPesquisar');
     await page.click('#btnPesquisar');
 
-    // 9. Aguarda o resultado: ou abre a nova aba (Sucesso) ou aparece o modal de erro na página atual
+    // 8. Corrida: aguarda ou a nova aba ou um modal de erro na página atual
     const raceResult = await Promise.race([
       newPagePromise.then(p => ({ tipo: 'NOVA_ABA', page: p })),
       page.waitForSelector('#j_idt101:not(.ui-overlay-hidden), #j_idt115:not(.ui-overlay-hidden), .ui-growl-message', { timeout: 15000 })
@@ -87,13 +100,13 @@ export async function consultarAntecedentesPCES(dados) {
         .catch(() => ({ tipo: 'TIMEOUT' }))
     ]);
 
-    // CENÁRIO A: SUCESSO - Nova Aba com a Certidão Aberta
+    // Cenário A: Certidão gerada na nova aba (NADA CONSTA)
     if (raceResult.tipo === 'NOVA_ABA' && raceResult.page) {
       const atestadoPage = raceResult.page;
-      await atestadoPage.waitForLoadState ? await atestadoPage.waitForLoadState('networkidle') : await new Promise(r => setTimeout(r, 2000));
-      
+      await new Promise(r => setTimeout(r, 2000));
       const corpoTexto = await atestadoPage.evaluate(() => document.body.innerText);
       
+      console.log('[PCES] Nova aba capturada com sucesso!');
       if (corpoTexto.includes('NADA CONSTA') || corpoTexto.includes('ATESTADO DE ANTECEDENTES')) {
         return {
           sucesso: true,
@@ -105,12 +118,13 @@ export async function consultarAntecedentesPCES(dados) {
       }
     }
 
-    // CENÁRIO B: Modais de Pendência, Inconsistência ou Bloqueio
+    // Cenário B: Modais de Pendência ou Inconsistência
     const modalBloqueioVisivel = await page.$eval('#j_idt101', el => !el.classList.contains('ui-overlay-hidden')).catch(() => false);
     const modalInconsistenteVisivel = await page.$eval('#j_idt115', el => !el.classList.contains('ui-overlay-hidden')).catch(() => false);
     const growlTexto = await page.$eval('#growlGeral', el => el.innerText).catch(() => '');
 
     if (modalBloqueioVisivel) {
+      console.log('[PCES] Alerta de bloqueio criminal detectado (#j_idt101).');
       return {
         sucesso: true,
         hasRecords: true,
@@ -121,6 +135,7 @@ export async function consultarAntecedentesPCES(dados) {
     }
 
     if (modalInconsistenteVisivel) {
+      console.log('[PCES] Dados inconsistentes detectados (#j_idt115).');
       return {
         sucesso: true,
         hasRecords: false,
@@ -148,3 +163,27 @@ export async function consultarAntecedentesPCES(dados) {
     await browser.close();
   }
 }
+
+// Rota POST chamada pelo SaaS
+app.post('/api/pces/antecedentes', async (req, res) => {
+  try {
+    const dados = req.body;
+    console.log('[PCES] Recebida solicitação de consulta:', dados.nome);
+    const resultado = await consultarAntecedentesPCES(dados);
+    res.json(resultado);
+  } catch (error) {
+    console.error('[PCES] Erro durante a execução do scraper:', error);
+    res.status(500).json({
+      sucesso: false,
+      hasRecords: true,
+      statusTexto: 'ERRO NA CONSULTA PCES',
+      mensagem: error.message
+    });
+  }
+});
+
+// Escuta na porta fornecida pelo Render (PORT)
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`PCES Scraper ativo e escutando na porta ${PORT}`);
+});
