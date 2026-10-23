@@ -1,179 +1,150 @@
-import express from 'express';
 import puppeteer from 'puppeteer';
-import cors from 'cors';
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-
-const PORT = process.env.PORT || 3000;
-
-app.post('/api/pces/antecedentes', async (req, res) => {
-  const { 
-    tipoDocumento, 
-    rg, 
-    uf, 
-    nome, 
-    nomePai, 
-    nomeMae, 
-    dataNascimento 
-  } = req.body;
-
-  // Validação dos campos obrigatórios da SESP/PCES
-  if (!rg || !nome || !nomeMae || !dataNascimento) {
-    return res.status(400).json({ 
-      error: 'Campos obrigatórios ausentes: rg, nome, nomeMae e dataNascimento são exigidos.' 
-    });
-  }
-
-  const cleanRg = rg.replace(/\D/g, '');
-  const cleanNome = nome.trim().toUpperCase();
-  const cleanPai = nomePai ? nomePai.trim().toUpperCase() : 'NAO DECLARADO';
-  const cleanMae = nomeMae.trim().toUpperCase();
-  const selectedUf = uf ? uf.trim().toUpperCase() : 'ES';
-  const docType = tipoDocumento ? tipoDocumento.trim().toUpperCase() : 'RG';
-
-  let browser = null;
+export async function consultarAntecedentesPCES(dados) {
+  const URL_ALVO = 'https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf';
+  
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu'
+    ]
+  });
 
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu'
-      ]
-    });
-
     const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+    
+    // 1. Acessa a página oficial
+    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 30000 });
 
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
+    // 2. Seleciona o tipo de documento no PrimeFaces (1 = RG, 7 = CNH, 12 = CIN)
+    let tipoDocValue = "1"; // Default RG
+    if (dados.tipoDocumento === 'CNH') tipoDocValue = "7";
+    if (dados.tipoDocumento === 'CIN') tipoDocValue = "12";
 
-    // 1. Navega até o portal oficial da SESP/PCES (JSF)
-    await page.goto('https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf', {
-      waitUntil: 'networkidle2',
-      timeout: 35000
+    await page.waitForSelector('#j_idt57_input');
+    await page.select('#j_idt57_input', tipoDocValue);
+    
+    // Dispara o evento de change do PrimeFaces para atualizar a tela
+    await page.evaluate(() => {
+      const select = document.getElementById('j_idt57_input');
+      select.dispatchEvent(new Event('change', { bubbles: true }));
     });
-
-    // 2. Preenchimento do Tipo de Documento (Tratamento para Select HTML e PrimeFaces)
-    await page.evaluate((targetType) => {
-      // Tenta pelo select HTML padrão
-      const selectDoc = document.querySelector('select[id*="tipoDoc"], select[id*="Documento"], select[name*="Documento"]');
-      if (selectDoc) {
-        for (let option of selectDoc.options) {
-          if (option.text.toUpperCase().includes(targetType) || option.value.toUpperCase().includes(targetType)) {
-            selectDoc.value = option.value;
-            selectDoc.dispatchEvent(new Event('change', { bubbles: true }));
-            return;
-          }
-        }
-      }
-
-      // Fallback para clique de rótulo visual PrimeFaces/JSF
-      const pfLabel = document.querySelector('label[id*="tipoDoc"], label[id*="Documento"]');
-      if (pfLabel) {
-        pfLabel.click();
-      }
-    }, docType).catch(() => {});
-
-    // Clica no item correspondente se abriu a lista de opções do PrimeFaces
-    await page.evaluate((targetType) => {
-      const items = Array.from(document.querySelectorAll('.ui-selectonemenu-item, li'));
-      const targetItem = items.find(el => el.innerText.toUpperCase().trim() === targetType || el.innerText.toUpperCase().includes(targetType));
-      if (targetItem) {
-        targetItem.click();
-      }
-    }, docType).catch(() => {});
+    await new Promise(r => setTimeout(r, 600));
 
     // 3. Preenchimento do Número do Documento
-    await page.waitForSelector('input[id*="numDoc"], input[id*="rg"], input[id*="Num"]', { timeout: 10000 });
-    await page.type('input[id*="numDoc"], input[id*="rg"], input[id*="Num"]', cleanRg);
+    await page.waitForSelector('#numero');
+    await page.focus('#numero');
+    const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
+    await page.keyboard.type(docLimpo, { delay: 40 });
 
-    // 4. Preenchimento da UF Emissora (Dinâmica)
-    await page.evaluate((targetUf) => {
-      const selectUf = document.querySelector('select[id*="ufDoc"], select[id*="uf"], select[name*="uf"]');
-      if (selectUf) {
-        selectUf.value = targetUf;
-        selectUf.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    }, selectedUf).catch(() => {});
+    // 4. Nome Completo do Candidato
+    await page.waitForSelector('#nomeIndividuo');
+    await page.focus('#nomeIndividuo');
+    await page.keyboard.type(dados.nome.toUpperCase().trim(), { delay: 30 });
 
-    // 5. Preenchimento de Nome, Filiação e Nascimento
-    await page.type('input[id*="nomePessoa"], input[id*="nome"]', cleanNome);
-    await page.type('input[id*="nomePai"], input[id*="pai"]', cleanPai);
-    await page.type('input[id*="nomeMae"], input[id*="mae"]', cleanMae);
-    await page.type('input[id*="dtNasc"], input[id*="dataNasc"], input[id*="nascimento"]', dataNascimento);
+    // 5. Nome do Pai (Opcional - deixar em branco se não houver)
+    if (dados.nomePai && dados.nomePai.trim() !== '' && dados.nomePai.toUpperCase() !== 'NÃO DECLARADO') {
+      await page.waitForSelector('#nomePai');
+      await page.focus('#nomePai');
+      await page.keyboard.type(dados.nomePai.toUpperCase().trim(), { delay: 30 });
+    }
 
-    // 6. Submete o formulário JSF
-    await Promise.all([
-      page.click('input[type="submit"], button[type="submit"], input[value*="Emitir"]'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 35000 }).catch(() => {})
+    // 6. Nome da Mãe
+    if (dados.nomeMae && dados.nomeMae.trim() !== '') {
+      await page.waitForSelector('#nomeMae');
+      await page.focus('#nomeMae');
+      await page.keyboard.type(dados.nomeMae.toUpperCase().trim(), { delay: 30 });
+    }
+
+    // 7. Data de Nascimento (Formato DD/MM/AAAA)
+    await page.waitForSelector('#dtNascimento_input');
+    await page.focus('#dtNascimento_input');
+    let dataFormatada = dados.dataNascimento;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
+      const [ano, mes, dia] = dataFormatada.split('-');
+      dataFormatada = `${dia}/${mes}/${ano}`;
+    }
+    await page.keyboard.type(dataFormatada, { delay: 40 });
+
+    // Prepara a escuta para a NOVA ABA (onde o Atestado é gerado)
+    const newPagePromise = new Promise(resolve => 
+      browser.once('targetcreated', target => resolve(target.page()))
+    );
+
+    // 8. Clica no botão Emitir Atestado
+    await page.waitForSelector('#btnPesquisar');
+    await page.click('#btnPesquisar');
+
+    // 9. Aguarda o resultado: ou abre a nova aba (Sucesso) ou aparece o modal de erro na página atual
+    const raceResult = await Promise.race([
+      newPagePromise.then(p => ({ tipo: 'NOVA_ABA', page: p })),
+      page.waitForSelector('#j_idt101:not(.ui-overlay-hidden), #j_idt115:not(.ui-overlay-hidden), .ui-growl-message', { timeout: 15000 })
+        .then(() => ({ tipo: 'MODAL_ERRO' }))
+        .catch(() => ({ tipo: 'TIMEOUT' }))
     ]);
 
-    // 7. Analisa o resultado na página
-    const content = await page.content();
-    const contentUpper = content.toUpperCase();
+    // CENÁRIO A: SUCESSO - Nova Aba com a Certidão Aberta
+    if (raceResult.tipo === 'NOVA_ABA' && raceResult.page) {
+      const atestadoPage = raceResult.page;
+      await atestadoPage.waitForLoadState ? await atestadoPage.waitForLoadState('networkidle') : await new Promise(r => setTimeout(r, 2000));
+      
+      const corpoTexto = await atestadoPage.evaluate(() => document.body.innerText);
+      
+      if (corpoTexto.includes('NADA CONSTA') || corpoTexto.includes('ATESTADO DE ANTECEDENTES')) {
+        return {
+          sucesso: true,
+          hasRecords: false,
+          statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
+          mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
+          rawSnippet: corpoTexto.slice(0, 300)
+        };
+      }
+    }
 
-    // Validação estrita do Atestado Negativo Emitido com Sucesso
-    const atestadoEmitidoComSucesso = 
-      contentUpper.includes('NADA CONSTA CONTRA') || 
-      (contentUpper.includes('ATESTO QUE') && contentUpper.includes('NADA CONSTA'));
+    // CENÁRIO B: Modais de Pendência, Inconsistência ou Bloqueio
+    const modalBloqueioVisivel = await page.$eval('#j_idt101', el => !el.classList.contains('ui-overlay-hidden')).catch(() => false);
+    const modalInconsistenteVisivel = await page.$eval('#j_idt115', el => !el.classList.contains('ui-overlay-hidden')).catch(() => false);
+    const growlTexto = await page.$eval('#growlGeral', el => el.innerText).catch(() => '');
 
-    if (atestadoEmitidoComSucesso) {
-      return res.json({
-        fonte: 'SESP_PCES',
-        rg: cleanRg,
-        uf: selectedUf,
-        nome: cleanNome,
-        sucesso: true,
-        hasRecords: false,
-        riskLevel: 'LOW',
-        statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
-        mensagem: 'Certidão negativa emitida com sucesso pela Polícia Civil / Polícia Científica.',
-        executedAt: new Date().toISOString()
-      });
-    } else {
-      // Retorno direto de Alerta de Risco Criminal
-      return res.json({
-        fonte: 'SESP_PCES',
-        rg: cleanRg,
-        uf: selectedUf,
-        nome: cleanNome,
+    if (modalBloqueioVisivel) {
+      return {
         sucesso: true,
         hasRecords: true,
         riskLevel: 'HIGH',
         statusTexto: 'NÃO FOI POSSÍVEL EMITIR CERTIDÃO NEGATIVA',
-        mensagem: 'ATENÇÃO: A certidão negativa não foi emitida. Possível existência de antecedentes criminais ou pendência grave registrada no banco de dados da Polícia Civil.',
-        executedAt: new Date().toISOString()
-      });
+        mensagem: 'Possível apontamento ou pendência na identificação criminal. O sistema oficial exige envio de documentos para atestado@pci.es.gov.br.'
+      };
     }
 
-  } catch (error) {
-    console.error('Erro na automação da SESP-ES:', error.message);
+    if (modalInconsistenteVisivel) {
+      return {
+        sucesso: true,
+        hasRecords: false,
+        riskLevel: 'MEDIUM',
+        statusTexto: 'DADOS INCONSISTENTES',
+        mensagem: 'Dados informados divergem dos registros cadastrais do Instituto de Identificação do ES.'
+      };
+    }
 
-    return res.status(500).json({
-      fonte: 'SESP_PCES',
+    if (growlTexto) {
+      return {
+        sucesso: false,
+        statusTexto: 'ALERTA DO SISTEMA SESP',
+        mensagem: growlTexto.trim()
+      };
+    }
+
+    return {
       sucesso: false,
-      hasRecords: true,
-      riskLevel: 'HIGH',
-      statusTexto: 'NÃO FOI POSSÍVEL EMITIR CERTIDÃO NEGATIVA',
-      error: 'O portal da SESP-ES impediu a emissão automática. ATENÇÃO: Verifique o histórico do candidato.',
-      details: error.message
-    });
-  } finally {
-    if (browser) {
-      await browser.close();
-    }
-  }
-});
+      statusTexto: 'RESPOSTA INDEFINIDA',
+      mensagem: 'Não foi possível confirmar o atestado nem capturar mensagem de erro.'
+    };
 
-app.listen(PORT, () => {
-  console.log(`Microserviço SESP/PCES rodando na porta ${PORT}`);
-});
+  } finally {
+    await browser.close();
+  }
+}
