@@ -6,12 +6,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Rota de teste simples (Health Check)
+// Health check para manter o Render acordado
 app.get('/', (req, res) => {
   res.json({ status: 'online', service: 'pces-scraper' });
 });
 
-// Função de Scraping no Portal PrimeFaces da PCES / SESP-ES
 async function consultarAntecedentesPCES(dados) {
   const URL_ALVO = 'https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf';
   
@@ -40,14 +39,13 @@ async function consultarAntecedentesPCES(dados) {
     await page.waitForSelector('#j_idt57_input', { timeout: 10000 });
     await page.select('#j_idt57_input', tipoDocValue);
     
-    // Dispara o change para o PrimeFaces reconhecer o documento
     await page.evaluate(() => {
       const select = document.getElementById('j_idt57_input');
-      select.dispatchEvent(new Event('change', { bubbles: true }));
+      if (select) select.dispatchEvent(new Event('change', { bubbles: true }));
     });
     await new Promise(r => setTimeout(r, 600));
 
-    // 2. Número do Documento (somente números)
+    // 2. Número do Documento
     await page.waitForSelector('#numero');
     await page.focus('#numero');
     const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
@@ -58,8 +56,8 @@ async function consultarAntecedentesPCES(dados) {
     await page.focus('#nomeIndividuo');
     await page.keyboard.type(dados.nome.toUpperCase().trim(), { delay: 30 });
 
-    // 4. Nome do Pai (deixa vazio se não houver)
-    if (dados.nomePai && dados.nomePai.trim() !== '' && dados.nomePai.toUpperCase() !== 'NÃO DECLARADO') {
+    // 4. Nome do Pai (opcional)
+    if (dados.nomePai && dados.nomePai.trim() !== '' && dados.nomePai.toUpperCase() !== 'NÃO DECLARADO' && dados.nomePai.toUpperCase() !== 'NAO DECLARADO') {
       await page.waitForSelector('#nomePai');
       await page.focus('#nomePai');
       await page.keyboard.type(dados.nomePai.toUpperCase().trim(), { delay: 30 });
@@ -72,7 +70,7 @@ async function consultarAntecedentesPCES(dados) {
       await page.keyboard.type(dados.nomeMae.toUpperCase().trim(), { delay: 30 });
     }
 
-    // 6. Data de Nascimento (DD/MM/AAAA)
+    // 6. Data de Nascimento (formato DD/MM/AAAA)
     await page.waitForSelector('#dtNascimento_input');
     await page.focus('#dtNascimento_input');
     let dataFormatada = dados.dataNascimento || '';
@@ -82,17 +80,17 @@ async function consultarAntecedentesPCES(dados) {
     }
     await page.keyboard.type(dataFormatada, { delay: 40 });
 
-    // Prepara a escuta para a NOVA ABA (onde a certidão é renderizada)
+    // Prepara escuta da segunda aba
     const newPagePromise = new Promise(resolve => 
       browser.once('targetcreated', target => resolve(target.page()))
     );
 
-    // 7. Clica em Emitir Atestado
+    // 7. Dispara emissão
     console.log('[PCES] Clicando no botão Emitir Atestado...');
     await page.waitForSelector('#btnPesquisar');
     await page.click('#btnPesquisar');
 
-    // 8. Corrida: aguarda ou a nova aba ou um modal de erro na página atual
+    // 8. Corrida: nova aba ou modal de erro
     const raceResult = await Promise.race([
       newPagePromise.then(p => ({ tipo: 'NOVA_ABA', page: p })),
       page.waitForSelector('#j_idt101:not(.ui-overlay-hidden), #j_idt115:not(.ui-overlay-hidden), .ui-growl-message', { timeout: 15000 })
@@ -100,7 +98,7 @@ async function consultarAntecedentesPCES(dados) {
         .catch(() => ({ tipo: 'TIMEOUT' }))
     ]);
 
-    // Cenário A: Certidão gerada na nova aba (NADA CONSTA)
+    // Cenário A: Nova aba com Nada Consta
     if (raceResult.tipo === 'NOVA_ABA' && raceResult.page) {
       const atestadoPage = raceResult.page;
       await new Promise(r => setTimeout(r, 2000));
@@ -124,7 +122,7 @@ async function consultarAntecedentesPCES(dados) {
     const growlTexto = await page.$eval('#growlGeral', el => el.innerText).catch(() => '');
 
     if (modalBloqueioVisivel) {
-      console.log('[PCES] Alerta de bloqueio criminal detectado (#j_idt101).');
+      console.log('[PCES] Alerta de pendência cadastral (#j_idt101).');
       return {
         sucesso: true,
         hasRecords: true,
@@ -164,7 +162,6 @@ async function consultarAntecedentesPCES(dados) {
   }
 }
 
-// Rota POST chamada pelo SaaS
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
     const dados = req.body;
@@ -175,14 +172,13 @@ app.post('/api/pces/antecedentes', async (req, res) => {
     console.error('[PCES] Erro durante a execução do scraper:', error);
     res.status(500).json({
       sucesso: false,
-      hasRecords: true,
+      hasRecords: false,
       statusTexto: 'ERRO NA CONSULTA PCES',
       mensagem: error.message
     });
   }
 });
 
-// Escuta na porta fornecida pelo Render (PORT)
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
   console.log(`PCES Scraper ativo e escutando na porta ${PORT}`);
