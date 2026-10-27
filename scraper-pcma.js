@@ -37,46 +37,83 @@ export async function consultarAntecedentesPCMA(dados) {
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda a aplicação SPA renderizar os componentes do formulário no DOM
-    await page.waitForSelector('input', { timeout: 15000 });
+    await page.waitForSelector('input', { timeout: 15000 }).catch(() => {});
     await new Promise(r => setTimeout(r, 2000)); // Tempo para hidratação do JS
 
-    // 1. Preenchimento do CPF
-    const cpfInput = await page.$('input[name*="cpf" i], input[placeholder*="CPF" i], input[formcontrolname*="cpf" i]');
-    if (cpfInput) {
-      const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
-      await cpfInput.type(cpfLimpo, { delay: 30 });
+    // Função auxiliar segura para preencher inputs por múltiplos seletores
+    async function preencherCampo(seletores, valor) {
+      if (!valor) return;
+      for (const seletor of seletores) {
+        try {
+          const el = await page.$(seletor);
+          if (el) {
+            await page.focus(seletor);
+            await page.evaluate(s => document.querySelector(s).value = '', seletor);
+            await page.type(seletor, String(valor), { delay: 30 });
+            return true;
+          }
+        } catch (e) {
+          // Tenta o próximo
+        }
+      }
+      return false;
     }
+
+    // 1. Preenchimento do CPF
+    const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
+    await preencherCampo([
+      'input[name*="cpf" i]', 
+      'input[placeholder*="CPF" i]', 
+      'input[formcontrolname*="cpf" i]',
+      'input[id*="cpf" i]'
+    ], cpfLimpo);
 
     // 2. Preenchimento do Nome Completo
-    const nomeInput = await page.$('input[name*="nome" i], input[placeholder*="nome" i], input[formcontrolname*="nome" i]');
-    if (nomeInput) {
-      await nomeInput.type(dados.nome.toUpperCase().trim(), { delay: 30 });
-    }
+    await preencherCampo([
+      'input[name*="nome" i]', 
+      'input[placeholder*="nome" i]', 
+      'input[formcontrolname*="nome" i]',
+      'input[id*="nome" i]'
+    ], dados.nome.toUpperCase().trim());
 
     // 3. Preenchimento da Data de Nascimento
-    const dataInput = await page.$('input[name*="nasc" i], input[placeholder*="data" i], input[placeholder*="dd/mm" i]');
-    if (dataInput) {
-      let dataFormatada = dados.dataNascimento || '';
-      if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
-        const [ano, mes, dia] = dataFormatada.split('-');
-        dataFormatada = `${dia}/${mes}/${ano}`;
+    let dataFormatada = dados.dataNascimento || '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
+      const [ano, mes, dia] = dataFormatada.split('-');
+      dataFormatada = `${dia}/${mes}/${ano}`;
+    }
+    await preencherCampo([
+      'input[name*="nasc" i]', 
+      'input[placeholder*="data" i]', 
+      'input[placeholder*="dd/mm" i]',
+      'input[formcontrolname*="nasc" i]'
+    ], dataFormatada);
+
+    // 4. Preenchimento do Nome da Mãe
+    if (dados.nomeMae && dados.nomeMae.trim() !== '') {
+      await preencherCampo([
+        'input[name*="mae" i]', 
+        'input[placeholder*="mãe" i]',
+        'input[formcontrolname*="mae" i]'
+      ], dados.nomeMae.toUpperCase().trim());
+    }
+
+    // 5. Acionar o Botão de Consulta / Pesquisa de forma segura (sem seletores inválidos)
+    console.log('[PCMA] Submetendo formulário de consulta...');
+    const botaoClicado = await page.evaluate(() => {
+      const elementos = Array.from(document.querySelectorAll('button, input[type="submit"], a.btn'));
+      const alvo = elementos.find(el => {
+        const txt = el.innerText.toLowerCase() || el.value?.toLowerCase() || '';
+        return txt.includes('pesquisar') || txt.includes('consultar') || txt.includes('emitir') || el.type === 'submit';
+      });
+      if (alvo) {
+        alvo.click();
+        return true;
       }
-      await dataInput.type(dataFormatada, { delay: 40 });
-    }
+      return false;
+    });
 
-    // 4. Preenchimento do Nome da Mãe (se solicitado pelo fluxo da tela)
-    const maeInput = await page.$('input[name*="mae" i], input[placeholder*="mãe" i]');
-    if (maeInput && dados.nomeMae) {
-      await maeInput.type(dados.nomeMae.toUpperCase().trim(), { delay: 30 });
-    }
-
-    // 5. Acionar o Botão de Consulta / Pesquisa
-    const btnPesquisar = await page.$('button[type="submit"], input[type="submit"], button:has-text("Pesquisar"), button:has-text("Consultar"), button:has-text("Emitir")');
-    if (btnPesquisar) {
-      console.log('[PCMA] Submetendo formulário de consulta...');
-      await btnPesquisar.click();
-    } else {
-      // Fallback: pressionar Enter caso o botão não tenha seletor direto
+    if (!botaoClicado) {
       await page.keyboard.press('Enter');
     }
 
@@ -114,8 +151,13 @@ export async function consultarAntecedentesPCMA(dados) {
     };
 
   } catch (error) {
-    console.error(`[PCMA] Erro crítico na execução:`, error.message);
-    throw error;
+    console.error(`[PCMA] Erro na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCMA',
+      mensagem: error.message
+    };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
