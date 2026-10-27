@@ -1,7 +1,6 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCRR(dados) {
-  // URL base do sistema de antecedentes de Roraima (ajuste o subdomínio se houver divergência no deploy)
   const URL_ALVO = 'http://antecedentes.ssp.rr.gov.br/pages/Atestado/IUAtestado.aspx';
 
   const browser = await puppeteer.launch({
@@ -10,6 +9,10 @@ export async function consultarAntecedentesPCRR(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -18,8 +21,19 @@ export async function consultarAntecedentesPCRR(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCRR] Acessando portal de antecedentes da PCRR para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda o formulário ASP.NET carregar
     await page.waitForSelector('input', { timeout: 15000 });
@@ -74,7 +88,7 @@ export async function consultarAntecedentesPCRR(dados) {
     if (btnGerar) {
       await Promise.all([
         btnGerar.click(),
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null)
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
       ]);
     } else {
       await page.keyboard.press('Enter');
@@ -112,7 +126,13 @@ export async function consultarAntecedentesPCRR(dados) {
       rawSnippet: resultadoTexto.slice(0, 300)
     };
 
+  } catch (error) {
+    console.error(`[PCRR] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCRR] Navegador encerrado com sucesso.`);
+    }
   }
 }
