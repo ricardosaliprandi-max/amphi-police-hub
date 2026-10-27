@@ -1,24 +1,33 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCCE(payload) {
-  const URL_ALVO = 'https://sistemas.sspds.ce.gov.br/AtestadoAntecedentes/index.do';
+  const URL_ALVO = 'https://sistemas.sspds.ce.gov.br/AtestadoAntecedentes/index.do?action=ShowAtestado';
   let browser = null;
 
-  // Normaliza o payload recebido do Hub
+  // 1. Telemetria e Caixa-Preta Local
+  const browserLogs = [];
+  const execSteps = [];
+
+  const logStep = (step, meta = {}) => {
+    execSteps.push({ step, time: new Date().toISOString(), ...meta });
+    console.log(`[PCCE][STEP] ${step}`);
+  };
+
+  // Normalização do Payload unificado
   const dados = payload?.dados && typeof payload.dados === 'object' 
     ? { ...payload.dados, ...payload } 
     : (payload || {});
 
   const nome = (dados.nome || '').toUpperCase().trim();
   const mae = (dados.nomeMae || dados.mae || '').toUpperCase().trim();
-  
-  // Regra estrita da PCCE: O RG não deve conter o dígito verificador
+
+  // Regra técnica estrita da PCCE: Remover dígito verificador do RG
   let rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
   if (rgLimpo.length > 1) {
-    rgLimpo = rgLimpo.slice(0, -1); // Remove o último dígito (verificador)
+    rgLimpo = rgLimpo.slice(0, -1);
   }
 
-  // Tratamento da data de nascimento para DD/MM/AAAA
+  // Formatação de Data para DD/MM/AAAA
   let dataNasc = dados.dataNascimento || dados.dtNascimento || '';
   if (/^\d{4}-\d{2}-\d{2}$/.test(dataNasc)) {
     const [ano, mes, dia] = dataNasc.split('-');
@@ -26,6 +35,7 @@ export async function consultarAntecedentesPCCE(payload) {
   }
 
   try {
+    logStep('iniciando_browser');
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -35,76 +45,190 @@ export async function consultarAntecedentesPCCE(payload) {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
-        '--single-process', // Essencial para gerir o limite de 512MB de RAM no Render
-        '--disable-gpu'
+        '--single-process',
+        '--disable-gpu',
+        '--disable-popup-blocking'
       ]
     });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
-    // Interceptação para poupar recursos de rede e memória RAM
+    // Listeners de Telemetria do Navegador
+    page.on('console', msg => {
+      browserLogs.push(`[Console ${msg.type().toUpperCase()}] ${msg.text()}`);
+    });
+    page.on('pageerror', err => {
+      browserLogs.push(`[Page Script Error] ${err.message}`);
+    });
+    page.on('requestfailed', req => {
+      browserLogs.push(`[Network Fail] ${req.method()} ${req.url()} - ${req.failure()?.errorText}`);
+    });
+
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+
+    // Interceptação de window.open caso a emissão dispare nova guia
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      window.__certidaoUrlAberta = null;
+      const originalOpen = window.open;
+      window.open = function(url) {
+        window.__certidaoUrlAberta = url;
+        return originalOpen ? originalOpen.apply(this, arguments) : null;
+      };
+    });
+
+    // Otimização de RAM
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+      const type = req.resourceType();
+      if (['image', 'font', 'media'].includes(type)) {
         req.abort();
       } else {
         req.continue();
       }
     });
 
-    console.log(`[PCCE] Acessando portal oficial SSPDS-CE para: ${nome}`);
+    logStep('navegando_portal_alvo', { url: URL_ALVO });
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
-    // Preenchimento dos campos do formulário conforme IDs/Names reais mapeados no HTML[cite: 2]
-    await page.waitForSelector('input[name="numRg"]', { timeout: 10000 }).catch(() => {});
+    // Aguarda o formulário carregar no DOM
+    await page.waitForSelector('input[name="numRg"]', { timeout: 15000 });
+    logStep('formulario_carregado');
 
-    await page.type('input[name="numRg"]', rgLimpo, { delay: 30 });
+    // Preenchimento dos campos mapeados no HTML
+    await page.focus('input[name="numRg"]');
+    await page.type('input[name="numRg"]', rgLimpo, { delay: 25 });
+
+    await page.focus('input[name="nome"]');
     await page.type('input[name="nome"]', nome, { delay: 20 });
-    await page.type('input[name="dataNasc"]', dataNasc, { delay: 20 });
-    
+
+    if (dataNasc) {
+      await page.focus('input[name="dataNasc"]');
+      await page.type('input[name="dataNasc"]', dataNasc, { delay: 25 });
+    }
+
     if (mae) {
+      await page.focus('input[name="mae"]');
       await page.type('input[name="mae"]', mae, { delay: 20 });
     }
 
-    console.log('[PCCE] Submetendo formulário de consulta...');
-    await Promise.all([
-      page.click('input[type="submit"]'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
-    ]);
+    logStep('dados_biograficos_preenchidos', { rgLimpo, dataNasc });
 
-    const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
-    const textoUpper = resultadoTexto.toUpperCase();
+    // Monitoramento de abertura de nova guia caso ocorra redirecionamento
+    const novaGuiaPromise = new Promise(resolve => {
+      const listener = target => {
+        if (target.type() === 'page') {
+          browser.off('targetcreated', listener);
+          resolve(target);
+        }
+      };
+      browser.on('targetcreated', listener);
+      setTimeout(() => {
+        browser.off('targetcreated', listener);
+        resolve(null);
+      }, 10000);
+    });
 
-    // Verificação de erros ou avisos institucionais retornados pelo Ceará
-    if (textoUpper.includes('NÃO FOI POSSÍVEL') || textoUpper.includes('DIRIGIR-SE') || textoUpper.includes('NÃO CONSTA EM NOSSA BASE')) {
+    // Submissão do formulário Struts
+    logStep('submetendo_formulario');
+    const submitBtn = await page.$('input[type="submit"][value="Pesquisar"], input[type="submit"]');
+
+    if (submitBtn) {
+      await Promise.all([
+        submitBtn.click(),
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
+      ]);
+    } else {
+      await page.keyboard.press('Enter');
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
+    }
+
+    logStep('navegacao_pos_submit_finalizada');
+
+    // 1. Checagem de Nova Guia / Popup
+    const targetGuia = await novaGuiaPromise;
+    const urlGuia = await page.evaluate(() => window.__certidaoUrlAberta);
+
+    if (targetGuia || urlGuia) {
+      logStep('certidao_emitida_em_nova_guia');
       return {
         sucesso: true,
         hasRecords: false,
-        statusTexto: 'ATENDIMENTO PRESENCIA/RESTRIÇÃO',
-        mensagem: 'O registro não consta na base digital da PCCE ou exige comparecimento à Coordenadoria de Identificação Humana (Benfica, Fortaleza).'
+        statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
+        mensagem: 'Certidão de antecedentes criminais emitida com sucesso pela SSPDS / PCCE.',
+        rawSnippet: urlGuia || targetGuia?.url() || 'atestado_emitido.html',
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
-    if (textoUpper.includes('EXISTEM REGISTROS') || textoUpper.includes('APONTAMENTO')) {
+    // 2. Extração e Diagnóstico do DOM retornado
+    const diagnostico = await page.evaluate(() => {
+      const errosEl = document.getElementById('errors');
+      const errosTexto = errosEl ? errosEl.innerText.trim() : '';
+      const corpoTexto = document.body ? document.body.innerText.replace(/\s+/g, ' ').trim() : '';
+
+      return {
+        errosTexto,
+        corpoTexto: corpoTexto.slice(0, 500)
+      };
+    });
+
+    logStep('diagnostico_dom_concluido', { temErrosDiv: Boolean(diagnostico.errosTexto) });
+
+    const textoAnalise = (diagnostico.errosTexto + ' ' + diagnostico.corpoTexto).toUpperCase();
+
+    // Restrição institucional de atendimento presencial
+    if (
+      textoAnalise.includes('NÃO FOI POSSÍVEL') || 
+      textoAnalise.includes('DIRIGIR-SE') || 
+      textoAnalise.includes('NÃO CONSTAR EM NOSSA BASE') ||
+      textoAnalise.includes('COORDENADORIA DE IDENTIFICAÇÃO HUMANA')
+    ) {
+      return {
+        sucesso: true,
+        hasRecords: false,
+        statusTexto: 'ATENDIMENTO PRESENCIAL / RESTRIÇÃO CADASTRAL',
+        mensagem: diagnostico.errosTexto || 'Registro não consta na base digital da PCCE ou exige comparecimento à Coordenadoria de Identificação Humana (Benfica, Fortaleza).',
+        rawSnippet: diagnostico.corpoTexto,
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
+      };
+    }
+
+    // Apontamento criminal ou pendência processual
+    if (textoAnalise.includes('EXISTEM REGISTROS') || textoAnalise.includes('APONTAMENTO') || textoAnalise.includes('PENDÊNCIA')) {
       return {
         sucesso: true,
         hasRecords: true,
         riskLevel: 'HIGH',
         statusTexto: 'REGISTRO LOCALIZADO',
-        mensagem: 'Identificado registro de antecedentes criminais na base da Polícia Civil do Ceará.',
-        rawSnippet: resultadoTexto.replace(/\s+/g, ' ').slice(0, 300)
+        mensagem: 'Identificado registro de antecedentes na base da Polícia Civil do Ceará.',
+        rawSnippet: diagnostico.corpoTexto,
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
-    if (textoUpper.includes('CERTIDÃO') || textoUpper.includes('NADA CONSTA')) {
+    // Sucesso direto na mesma página
+    if (textoAnalise.includes('NADA CONSTA') || textoAnalise.includes('ATESTADO DE ANTECEDENTES') || textoAnalise.includes('CERTIDÃO NEGATIVA')) {
       return {
         sucesso: true,
         hasRecords: false,
         statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
         mensagem: 'Nada Consta nos antecedentes criminais da Polícia Civil do Ceará.',
-        rawSnippet: resultadoTexto.replace(/\s+/g, ' ').slice(0, 300)
+        rawSnippet: diagnostico.corpoTexto,
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
@@ -113,21 +237,30 @@ export async function consultarAntecedentesPCCE(payload) {
       hasRecords: false,
       statusTexto: 'SOLICITAÇÃO PROCESSADA',
       mensagem: 'Consulta executada no portal da PCCE.',
-      rawSnippet: resultadoTexto.replace(/\s+/g, ' ').slice(0, 300)
+      rawSnippet: diagnostico.corpoTexto,
+      debug: {
+        etapasExecutadas: execSteps,
+        logsNavegador: browserLogs
+      }
     };
 
   } catch (error) {
-    console.error(`[PCCE] Erro na execução:`, error.message);
+    console.error(`[PCCE] Erro:`, error.message);
     return {
       sucesso: false,
       hasRecords: false,
       statusTexto: 'FALHA NA EXECUÇÃO PCCE',
-      mensagem: error.message
+      mensagem: error.message,
+      debug: {
+        etapasExecutadas: execSteps,
+        logsNavegador: browserLogs,
+        stackTrace: error.stack
+      }
     };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
-      console.log(`[PCCE] Navegador encerrado com sucesso.`);
+      console.log('[PCCE] Instância do navegador encerrada.');
     }
   }
 }
