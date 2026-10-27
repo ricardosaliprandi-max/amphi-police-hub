@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCPB(dados) {
-  const URL_ALVO = 'https://antecedentes.ssp.pb.gov.br/'; // Ajuste conforme a URL exata do portal se necessário
+  const URL_ALVO = 'https://antecedentes.ssp.pb.gov.br/';
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCPB(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -17,8 +21,19 @@ export async function consultarAntecedentesPCPB(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCPB] Acessando portal da PCPB (Vsoft iDSPS) para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda o formulário carregar
     await page.waitForSelector('form#form', { timeout: 15000 });
@@ -57,7 +72,7 @@ export async function consultarAntecedentesPCPB(dados) {
     console.log('[PCPB] Clicando no botão Emitir...');
     await Promise.all([
       page.click('button#btEmitir'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null)
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
     ]);
 
     // Aguarda eventual modal ou renderização de resultado
@@ -93,7 +108,13 @@ export async function consultarAntecedentesPCPB(dados) {
       rawSnippet: resultadoTexto.slice(0, 300)
     };
 
+  } catch (error) {
+    console.error(`[PCPB] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCPB] Navegador encerrado com sucesso.`);
+    }
   }
 }
