@@ -4,7 +4,16 @@ export async function consultarAntecedentesPCES(payload) {
   const URL_ALVO = 'https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf';
   let browser = null;
 
-  // 1. Normalização dos dados
+  // 1. Telemetria e Caixa-Preta Local
+  const browserLogs = [];
+  const execSteps = [];
+
+  const logStep = (step, meta = {}) => {
+    execSteps.push({ step, time: new Date().toISOString(), ...meta });
+    console.log(`[PCES][STEP] ${step}`);
+  };
+
+  // Normalização do Payload
   const dados = payload?.dados && typeof payload.dados === 'object' 
     ? { ...payload.dados, ...payload } 
     : (payload || {});
@@ -15,21 +24,24 @@ export async function consultarAntecedentesPCES(payload) {
   const numeroDoc = String(dados.rg || dados.numero || dados.cpf || '').replace(/\D/g, '');
 
   let dataNasc = dados.dataNascimento || dados.dtNascimento || '';
-  let dia = '', mes = '', ano = '';
   if (/^\d{4}-\d{2}-\d{2}$/.test(dataNasc)) {
-    [ano, mes, dia] = dataNasc.split('-');
+    const [ano, mes, dia] = dataNasc.split('-');
     dataNasc = `${dia}/${mes}/${ano}`;
-  } else if (/^\d{2}\/\d{2}\/\d{4}$/.test(dataNasc)) {
-    [dia, mes, ano] = dataNasc.split('/');
   }
 
-  // Mapeamento do tipo de documento (1 = RG, 7 = CNH, 12 = CIN)
   const tipoDocStr = (dados.tipoDocumento || 'RG').toUpperCase();
   let valorTipoDoc = '1';
-  if (tipoDocStr.includes('CNH')) valorTipoDoc = '7';
-  else if (tipoDocStr.includes('CIN')) valorTipoDoc = '12';
+  let labelTipoDoc = 'CARTEIRA DE IDENTIDADE (RG)';
+  if (tipoDocStr.includes('CNH')) {
+    valorTipoDoc = '7';
+    labelTipoDoc = 'CNH';
+  } else if (tipoDocStr.includes('CIN')) {
+    valorTipoDoc = '12';
+    labelTipoDoc = 'CIN';
+  }
 
   try {
+    logStep('iniciando_browser');
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -47,19 +59,32 @@ export async function consultarAntecedentesPCES(payload) {
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
+
+    // 2. Conexão dos Listeners de Auditoria do Navegador
+    page.on('console', msg => {
+      browserLogs.push(`[Console ${msg.type().toUpperCase()}] ${msg.text()}`);
+    });
+    page.on('pageerror', err => {
+      browserLogs.push(`[Page Script Error] ${err.message}`);
+    });
+    page.on('requestfailed', req => {
+      browserLogs.push(`[Network Fail] ${req.method()} ${req.url()} - ${req.failure()?.errorText}`);
+    });
+
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
 
-    // Intercepta a abertura de janela / redirecionamento do atestado
+    // Interceptação de window.open para capturar popups e abas do PrimeFaces[cite: 2, 3]
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      window.__urlAtestadoEmitido = null;
+      window.__certidaoUrlAberta = null;
       const originalOpen = window.open;
       window.open = function(url) {
-        window.__urlAtestadoEmitido = url;
+        window.__certidaoUrlAberta = url;
         return originalOpen ? originalOpen.apply(this, arguments) : null;
       };
     });
 
+    // Otimização de RAM
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const type = req.resourceType();
@@ -70,38 +95,39 @@ export async function consultarAntecedentesPCES(payload) {
       }
     });
 
-    console.log(`[PCES] Carregando portal SESP-ES para: ${nome}`);
+    logStep('navegando_portal_alvo', { url: URL_ALVO });
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
     await page.waitForSelector('#formMaster', { timeout: 15000 });
+    logStep('portal_carregado');
 
-    // 1. IP da Estação (#idIPEstacao)
-    await page.evaluate(() => {
-      const el = document.getElementById('idIPEstacao');
-      if (el) el.value = '177.185.0.1';
-      if (typeof setarIpEstacaoBean === 'function') {
-        setarIpEstacaoBean();
+    // 1. IP da Estação (#idIPEstacao)[cite: 2, 3]
+    try {
+      await page.evaluate(() => {
+        const el = document.getElementById('idIPEstacao');
+        if (el) el.value = '177.185.0.1';
+        if (typeof setarIpEstacaoBean === 'function') setarIpEstacaoBean();
+      });
+      logStep('ip_estacao_configurado');
+    } catch (e) {
+      logStep('falha_ip_estacao', { erro: e.message });
+    }
+
+    // 2. Seleção de Tipo de Documento no PrimeFaces[cite: 2, 3]
+    await page.evaluate(({ val, lbl }) => {
+      const select = document.getElementById('j_idt57_input');
+      const label = document.getElementById('j_idt57_label');
+      if (select) {
+        select.value = val;
+        if (label) label.innerText = lbl;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        if (window.jQuery) window.jQuery(select).trigger('change');
       }
-    }).catch(() => {});
+    }, { val: valorTipoDoc, lbl: labelTipoDoc });
 
     await new Promise(r => setTimeout(r, 600));
+    logStep('documento_selecionado', { valorTipoDoc });
 
-    // 2. Seleção do Documento via widget oficial do PrimeFaces
-    await page.evaluate((val) => {
-      if (window.PF && PF('widget_j_idt57')) {
-        PF('widget_j_idt57').selectValue(val);
-      } else {
-        const sel = document.getElementById('j_idt57_input');
-        if (sel) {
-          sel.value = val;
-          sel.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }
-    }, valorTipoDoc);
-
-    // Aguarda o AJAX disparado pelo onchange do Select (#pngFiltro)
-    await new Promise(r => setTimeout(r, 1000));
-
-    // 3. Preenchimento de Número e Nome
+    // 3. Preenchimento de Número e Nome[cite: 2, 3]
     await page.type('#numero', numeroDoc, { delay: 20 });
     await page.type('#nomeIndividuo', nome, { delay: 20 });
 
@@ -112,26 +138,17 @@ export async function consultarAntecedentesPCES(payload) {
       await page.type('#nomeMae', nomeMae, { delay: 20 });
     }
 
-    // 4. Preenchimento da Data de Nascimento via widget do Calendar e input direto
+    // 4. Data de Nascimento via digitação na máscara do PrimeFaces[cite: 2, 3]
     if (dataNasc) {
-      await page.evaluate(({ dStr, y, m, d }) => {
-        const widgetCal = window.PF ? PF('widget_dtNascimento') : null;
-        if (widgetCal && typeof widgetCal.setDate === 'function' && y && m && d) {
-          widgetCal.setDate(new Date(parseInt(y, 10), parseInt(m, 10) - 1, parseInt(d, 10)));
-        }
-        const inputData = document.getElementById('dtNascimento_input');
-        if (inputData) {
-          inputData.value = dStr;
-          inputData.dispatchEvent(new Event('input', { bubbles: true }));
-          inputData.dispatchEvent(new Event('change', { bubbles: true }));
-          inputData.dispatchEvent(new Event('blur', { bubbles: true }));
-        }
-      }, { dStr: dataNasc, y: ano, m: mes, d: dia });
+      await page.focus('#dtNascimento_input');
+      await page.type('#dtNascimento_input', dataNasc, { delay: 30 });
+      await page.keyboard.press('Tab');
     }
 
     await new Promise(r => setTimeout(r, 500));
+    logStep('dados_biograficos_preenchidos', { numeroDoc, dataNasc });
 
-    // 5. Monitoramento da abertura de nova aba (window.open / targetcreated)
+    // 5. Monitor de Nova Aba (Target Created)[cite: 2, 3]
     const novaGuiaPromise = new Promise(resolve => {
       const listener = target => {
         if (target.type() === 'page' || target.url().includes('exibiratestado')) {
@@ -146,42 +163,49 @@ export async function consultarAntecedentesPCES(payload) {
       }, 12000);
     });
 
-    // 6. Submissão acionando o botão oficial do PrimeFaces
-    console.log('[PCES] Submetendo pesquisa (#btnPesquisar)...');
+    // 6. Submissão via clique no botão oficial[cite: 2, 3]
+    logStep('clicando_btn_pesquisar');
     await page.evaluate(() => {
       const btn = document.getElementById('btnPesquisar');
       if (btn) btn.click();
     });
 
-    // Aguarda o término da requisição AJAX (loading sumir ou modal/popup surgir)
+    // Aguarda o término da requisição AJAX do PrimeFaces[cite: 2, 3]
+    logStep('aguardando_retorno_ajax');
     await page.waitForFunction(() => {
-      const urlAberta = Boolean(window.__urlAtestadoEmitido);
+      const urlAberta = Boolean(window.__certidaoUrlAberta);
       const dlgPendencia = document.getElementById('j_idt101');
-      const pendenciaVisivel = dlgPendencia && !dlgPendencia.classList.contains('ui-overlay-hidden');
+      const pendenciaAberta = dlgPendencia && !dlgPendencia.classList.contains('ui-overlay-hidden');
       const dlgInconsistente = document.getElementById('j_idt115');
-      const inconsistenteVisivel = dlgInconsistente && !dlgInconsistente.classList.contains('ui-overlay-hidden');
+      const inconsistenteAberto = dlgInconsistente && !dlgInconsistente.classList.contains('ui-overlay-hidden');
       const growl = document.querySelector('#growlGeral .ui-growl-message, .ui-messages-error');
       const temGrowl = Boolean(growl && growl.innerText.trim());
 
-      return urlAberta || pendenciaVisivel || inconsistenteVisivel || temGrowl;
+      return urlAberta || pendenciaAberta || inconsistenteAberto || temGrowl;
     }, { timeout: 15000 }).catch(() => {});
 
-    // Checagem se gerou certidão em nova aba
+    logStep('pos_ajax_finalizado');
+
+    // 7. Checagem de Nova Guia (Sucesso / Certidão Emitida)[cite: 2, 3]
     const targetGuia = await novaGuiaPromise;
-    const urlGuia = await page.evaluate(() => window.__urlAtestadoEmitido);
+    const urlGuia = await page.evaluate(() => window.__certidaoUrlAberta);
 
     if (targetGuia || urlGuia) {
-      console.log('[PCES] Certidão emitida com sucesso em nova aba.');
+      logStep('certidao_emitida_em_nova_guia');
       return {
         sucesso: true,
         hasRecords: false,
         statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
         mensagem: 'Certidão de antecedentes criminais emitida com sucesso pela PCES.',
-        rawSnippet: urlGuia || targetGuia?.url() || 'exibiratestado.jsf'
+        rawSnippet: urlGuia || targetGuia?.url() || 'exibiratestado.jsf',
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
-    // Checagem dos modais institucionais do PrimeFaces
+    // 8. Checagem de Modais e Mensagens do PrimeFaces[cite: 2, 3]
     const diagnostico = await page.evaluate(() => {
       const dlgInconsistente = document.getElementById('j_idt115');
       const inconsistenteVisivel = dlgInconsistente && !dlgInconsistente.classList.contains('ui-overlay-hidden');
@@ -200,13 +224,23 @@ export async function consultarAntecedentesPCES(payload) {
       };
     });
 
+    logStep('diagnostico_dom_concluido', {
+      inconsistente: diagnostico.inconsistenteVisivel,
+      pendencia: diagnostico.pendenciaVisivel,
+      temGrowl: Boolean(diagnostico.growlTexto)
+    });
+
     if (diagnostico.inconsistenteVisivel) {
       return {
         sucesso: true,
         hasRecords: false,
         statusTexto: 'DADOS INCONSISTENTES',
         mensagem: 'Dados inconsistentes com o Instituto de Identificação do ES. Envie cópia para instituto.identificacao@pci.es.gov.br.',
-        rawSnippet: diagnostico.corpoTexto
+        rawSnippet: diagnostico.corpoTexto,
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
@@ -217,7 +251,11 @@ export async function consultarAntecedentesPCES(payload) {
         riskLevel: 'HIGH',
         statusTexto: 'PENDÊNCIA CADASTRAL / APONTAMENTO',
         mensagem: 'Encaminhe cópia de documento de identificação para atestado@pci.es.gov.br.',
-        rawSnippet: diagnostico.corpoTexto
+        rawSnippet: diagnostico.corpoTexto,
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
@@ -227,7 +265,11 @@ export async function consultarAntecedentesPCES(payload) {
         hasRecords: false,
         statusTexto: 'ALERTA DO SISTEMA SESP',
         mensagem: diagnostico.growlTexto,
-        rawSnippet: diagnostico.corpoTexto
+        rawSnippet: diagnostico.corpoTexto,
+        debug: {
+          etapasExecutadas: execSteps,
+          logsNavegador: browserLogs
+        }
       };
     }
 
@@ -236,7 +278,11 @@ export async function consultarAntecedentesPCES(payload) {
       hasRecords: false,
       statusTexto: 'SOLICITAÇÃO PROCESSADA',
       mensagem: 'Formulário submetido no portal da PCES.',
-      rawSnippet: diagnostico.corpoTexto
+      rawSnippet: diagnostico.corpoTexto,
+      debug: {
+        etapasExecutadas: execSteps,
+        logsNavegador: browserLogs
+      }
     };
 
   } catch (error) {
@@ -245,7 +291,12 @@ export async function consultarAntecedentesPCES(payload) {
       sucesso: false,
       hasRecords: false,
       statusTexto: 'FALHA NA EXECUÇÃO PCES',
-      mensagem: error.message
+      mensagem: error.message,
+      debug: {
+        etapasExecutadas: execSteps,
+        logsNavegador: browserLogs,
+        stackTrace: error.stack
+      }
     };
   } finally {
     if (browser) {
