@@ -43,11 +43,10 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. NOVA ROTA: Consulta em Lote / Sequencial (Com validação defensiva para req.body)
+// 2. ROTA EM LOTE / SEQUENCIAL (Otimizada para poupar RAM no Render)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
   const dados = req.body || {};
   
-  // Validação defensiva: se o body vier vazio ou sem nome, retorna erro amigável em vez de crashar
   if (!dados.nome) {
     return res.status(400).json({
       sucesso: false,
@@ -76,12 +75,20 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
 
     const resultadosUFs = [];
 
-    // Executa as consultas de forma sequencial para preservar a memória RAM do servidor
+    // Executa as consultas de forma estritamente sequencial com respiro de memória
     for (const item of scrapersMap) {
       try {
         console.log(`[HUB] Consultando estado: ${item.uf.toUpperCase()}...`);
         const resultado = await item.fn(dados);
         resultadosUFs.push({ uf: item.uf, ...resultado });
+
+        // Pausa de 1.5s entre estados para o Render respirar e consolidar a RAM
+        await new Promise(r => setTimeout(r, 1500));
+
+        // Força a coleta de lixo do Node.js se ativada (--expose-gc)
+        if (global.gc) {
+          global.gc();
+        }
       } catch (error) {
         console.error(`[HUB] Erro na UF ${item.uf.toUpperCase()}:`, error.message);
         resultadosUFs.push({
