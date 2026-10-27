@@ -1,5 +1,7 @@
 import express from 'express';
 import cors from 'cors';
+
+// Importação de todos os scrapers estaduais mapeados no Hub
 import { consultarAntecedentesPCES } from './scraper-pces.js';
 import { consultarAntecedentesPCAC } from './scraper-pcac.js';
 import { consultarAntecedentesPCAL } from './scraper-pcal.js';
@@ -14,29 +16,37 @@ import { consultarAntecedentesPCRR } from './scraper-pcrr.js';
 import { consultarAntecedentesPCSC } from './scraper-pcsc.js';
 
 const app = express();
+
 app.use(cors());
 app.use(express.json());
 
-// Health check para manter o Render acordado
+// Health check para manter o serviço acordado no Render
 app.get('/', (req, res) => {
-  res.json({ status: 'online', service: 'amphi-police-hub' });
+  return res.json({ status: 'online', service: 'amphi-police-hub' });
 });
 
-// 1. Rota Legada (Garante 100% de compatibilidade com a bancada AMPHI atual)
+// 1. Rota Legada (Garante 100% de compatibilidade com a bancada AMPHI atual para o Espírito Santo)
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
     const rawBody = req.body || {};
-    const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
+    const dados = rawBody.dados && typeof rawBody.dados === 'object' 
+      ? { ...rawBody.dados, ...rawBody } 
+      : rawBody;
 
     if (!dados.nome) {
-      return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
+      return res.status(400).json({ 
+        sucesso: false, 
+        mensagem: 'O campo "nome" é obrigatório no corpo JSON.' 
+      });
     }
+
     console.log('[HUB] Consulta PCES via rota direta:', dados.nome);
     const resultado = await consultarAntecedentesPCES(dados);
-    res.json(resultado);
+    return res.json(resultado);
+
   } catch (error) {
     console.error('[HUB] Erro na consulta PCES:', error);
-    res.status(500).json({
+    return res.status(500).json({
       sucesso: false,
       hasRecords: false,
       statusTexto: 'ERRO NA CONSULTA PCES',
@@ -45,20 +55,22 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. ROTA EM LOTE SELETIVA (Otimizada para varrer apenas os estados marcados pelo operador)
+// 2. ROTA EM LOTE SELETIVA (Otimizada para varrer apenas os estados selecionados via checkbox pelo operador)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
   const rawBody = req.body || {};
-  const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
-  
+  const dados = rawBody.dados && typeof rawBody.dados === 'object' 
+    ? { ...rawBody.dados, ...rawBody } 
+    : rawBody;
+
   if (!dados.nome) {
     return res.status(400).json({
       sucesso: false,
       statusTexto: 'REQUISIÇÃO INVÁLIDA',
-      mensagem: 'O corpo da requisição (JSON) está vazio ou não contém o campo "nome". Verifique se o Header "Content-Type: application/json" está configurado no Postman.'
+      mensagem: 'O corpo da requisição (JSON) está vazio ou não contém o campo "nome". Verifique se o Header "Content-Type: application/json" está configurado.'
     });
   }
 
-  // Mapeamento geral de todos os scrapers ativos
+  // Mapeamento geral de todos os scrapers automáticos ativos
   const scrapersMap = [
     { uf: 'es', fn: consultarAntecedentesPCES },
     { uf: 'ac', fn: consultarAntecedentesPCAC },
@@ -74,7 +86,7 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
     { uf: 'sc', fn: consultarAntecedentesPCSC }
   ];
 
-  // Mapeamento geral de barreiras institucionais
+  // Mapeamento geral de barreiras institucionais (estados sem automação web direta)
   const institucionalMap = [
     { uf: 'go', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige resolução de Captcha e fluxo multi-fases.' },
     { uf: 'mg', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige validação por Captcha visual interno.' },
@@ -83,10 +95,8 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
     { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
   ];
 
-  // Se o operador enviou um array de estados (ex: dados.estados = ['es', 'ce', 'mg']), filtramos apenas eles.
-  // Caso contrário, executa todos os estados disponíveis por padrão.
+  // Identifica os estados marcados pelo operador (via array de checkboxes na requisição)
   const estadosFiltrados = rawBody.estados || dados.estados;
-  
   let alvosScrapers = scrapersMap;
   let alvosInstitucionais = institucionalMap;
 
@@ -96,7 +106,8 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
     alvosInstitucionais = institucionalMap.filter(i => ufsDesejadas.includes(i.uf));
   }
 
-  console.log(`[HUB] Iniciando varredura seletiva para UFs [${[...alvosScrapers.map(s => s.uf), ...alvosInstitucionais.map(i => i.uf)].join(', ').toUpperCase()}] para: ${dados.nome}`);
+  const UFsAtivas = [...alvosScrapers.map(s => s.uf), ...alvosInstitucionais.map(i => i.uf)];
+  console.log(`[HUB] Iniciando varredura seletiva para UFs [${UFsAtivas.join(', ').toUpperCase()}] para: ${dados.nome}`);
 
   try {
     const resultadosUFs = [];
@@ -108,9 +119,8 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
         const resultado = await item.fn(dados);
         resultadosUFs.push({ uf: item.uf, ...resultado });
 
-        // Pausa de 1.5s entre estados para o Render respirar e consolidar a RAM
+        // Pausa estratégica de 1.5s entre estados para o Render consolidar a RAM
         await new Promise(r => setTimeout(r, 1500));
-
         if (global.gc) {
           global.gc();
         }
@@ -144,21 +154,25 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
   }
 });
 
-// 3. Rota Unificada Individual
+// 3. Rota Unificada Individual por Estado
 app.post('/api/v1/:uf/antecedentes', async (req, res) => {
   const uf = req.params.uf.toLowerCase().trim();
   const rawBody = req.body || {};
-  const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
+  const dados = rawBody.dados && typeof rawBody.dados === 'object' 
+    ? { ...rawBody.dados, ...rawBody } 
+    : rawBody;
 
   if (!dados.nome) {
-    return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
+    return res.status(400).json({ 
+      sucesso: false, 
+      mensagem: 'O campo "nome" é obrigatório no corpo JSON.' 
+    });
   }
 
-  console.log(`[HUB] Requisição multi-estado recebida para UF: ${uf.toUpperCase()}`);
+  console.log(`[HUB] Requisição individual recebida para UF: ${uf.toUpperCase()}`);
 
   try {
     let resultado;
-
     switch (uf) {
       case 'es':
         resultado = await consultarAntecedentesPCES(dados);
@@ -196,7 +210,6 @@ app.post('/api/v1/:uf/antecedentes', async (req, res) => {
       case 'sc':
         resultado = await consultarAntecedentesPCSC(dados);
         break;
-
       case 'go':
       case 'mg':
       case 'df':
@@ -217,7 +230,6 @@ app.post('/api/v1/:uf/antecedentes', async (req, res) => {
           mensagem: `A consulta online para ${uf.toUpperCase()} possui barreiras técnicas: ${barreiras[uf]}.`
         });
       }
-
       default:
         return res.status(400).json({
           sucesso: false,
@@ -243,5 +255,5 @@ app.post('/api/v1/:uf/antecedentes', async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => {
-  console.log(`AMPHI Police Scraper Hub ativo na porta ${PORT}`);
+  console.log(`[AMPHI Police Scraper Hub] Ativo e escutando na porta ${PORT}`);
 });
