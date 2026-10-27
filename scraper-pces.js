@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCES(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -16,9 +20,20 @@ export async function consultarAntecedentesPCES(dados) {
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
+
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
     
     console.log(`[PCES] Acessando portal oficial para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // 1. Tipo de documento no PrimeFaces (1 = RG, 7 = CNH, 12 = CIN)
     let tipoDocValue = "1";
@@ -146,7 +161,13 @@ export async function consultarAntecedentesPCES(dados) {
       mensagem: 'Não foi possível confirmar o atestado nem capturar mensagem de erro.'
     };
 
+  } catch (error) {
+    console.error(`[PCES] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCES] Navegador encerrado com sucesso.`);
+    }
   }
 }
