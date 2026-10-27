@@ -25,7 +25,10 @@ app.get('/', (req, res) => {
 // 1. Rota Legada (Garante 100% de compatibilidade com a bancada AMPHI atual)
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
-    const dados = req.body || {};
+    const rawBody = req.body || {};
+    // Extração flexível: aceita tanto direto na raiz quanto dentro de req.body.dados
+    const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
+
     if (!dados.nome) {
       return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
     }
@@ -45,7 +48,8 @@ app.post('/api/pces/antecedentes', async (req, res) => {
 
 // 2. ROTA EM LOTE / SEQUENCIAL (Otimizada para poupar RAM no Render)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
-  const dados = req.body || {};
+  const rawBody = req.body || {};
+  const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
   
   if (!dados.nome) {
     return res.status(400).json({
@@ -131,7 +135,8 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
 // 3. Rota Unificada Individual
 app.post('/api/v1/:uf/antecedentes', async (req, res) => {
   const uf = req.params.uf.toLowerCase().trim();
-  const dados = req.body || {};
+  const rawBody = req.body || {};
+  const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
 
   if (!dados.nome) {
     return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
