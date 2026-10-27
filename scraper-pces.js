@@ -12,18 +12,17 @@ export async function consultarAntecedentesPCES(dados) {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
+      '--single-process',
       '--disable-gpu',
       '--disable-infobars',
       '--window-size=1280,800',
-      '--disable-blink-features=AutomationControlled' // Desativa flags que expõem o robô
+      '--disable-blink-features=AutomationControlled'
     ]
   });
 
   try {
     const page = await browser.newPage();
     
-    // Camuflagem rigorosa contra firewalls (Oracle Access Manager / WAF)
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
     
     await page.setExtraHTTPHeaders({
@@ -33,13 +32,11 @@ export async function consultarAntecedentesPCES(dados) {
 
     await page.evaluateOnNewDocument(() => {
       Object.defineProperty(navigator, 'webdriver', { get: () => false });
-      // Simula plugins e linguagens reais
       Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
     });
 
     await page.setViewport({ width: 1280, height: 800 });
 
-    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
@@ -52,18 +49,15 @@ export async function consultarAntecedentesPCES(dados) {
     
     console.log(`[PCES] Acessando portal oficial com camuflagem anti-bot para: ${dados.nome}`);
     
-    // Navegação defensiva com tratamento de timeout e erros de rede
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(err => {
       throw new Error(`Falha de conexão com o portal da SESP-ES: ${err.message}`);
     });
 
-    // Aguarda o formulário carregar com segurança
     await page.waitForSelector('#formMaster', { timeout: 20000 }).catch(() => {
       throw new Error('O formulário principal (#formMaster) não foi renderizado pelo portal.');
     });
 
-    // 1. Seleção Correta do Tipo de Documento no PrimeFaces do ES
-    let tipoDocValue = "1"; // Padrão RG
+    let tipoDocValue = "1";
     const docTipoDesejado = (dados.tipoDocumento || 'RG').toUpperCase();
     if (docTipoDesejado.includes('CNH')) tipoDocValue = "7";
     if (docTipoDesejado.includes('CIN')) tipoDocValue = "12";
@@ -80,7 +74,6 @@ export async function consultarAntecedentesPCES(dados) {
     }, tipoDocValue);
     await new Promise(r => setTimeout(r, 800));
 
-    // 2. Preenchimento blindado dos campos do formulário
     const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
     if (docLimpo) {
       await page.focus('#numero');
@@ -117,7 +110,6 @@ export async function consultarAntecedentesPCES(dados) {
       await page.type('#dtNascimento_input', dataFormatada, { delay: 40 });
     }
 
-    // Escuta por nova aba (caso abra o atestado em PDF/pop-up)
     let novaAba = null;
     browser.once('targetcreated', async target => {
       try {
@@ -126,16 +118,13 @@ export async function consultarAntecedentesPCES(dados) {
       } catch (e) {}
     });
 
-    // 3. Disparar a Pesquisa clicando no botão oficial #btnPesquisar
     console.log('[PCES] Disparando botão Emitir Atestado...');
     await page.click('#btnPesquisar').catch(async () => {
       await page.evaluate(() => document.getElementById('btnPesquisar').click());
     });
 
-    // Aguarda o processamento do AJAX e renderização de modais / nova aba
     await new Promise(r => setTimeout(r, 6000));
 
-    // Se abriu nova aba com o resultado
     if (novaAba) {
       try {
         await new Promise(r => setTimeout(r, 2000));
@@ -152,7 +141,6 @@ export async function consultarAntecedentesPCES(dados) {
       } catch (e) {}
     }
 
-    // 4. Verificação de Modais de Bloqueio ou Erro
     const resultadoAnalise = await page.evaluate(() => {
       const growl = document.querySelector('#growlGeral, .ui-growl-message, .ui-messages-error-summary');
       if (growl && growl.innerText.trim() !== '') {
@@ -204,13 +192,12 @@ export async function consultarAntecedentesPCES(dados) {
 
     const textoTotal = resultadoAnalise.texto.toUpperCase();
 
-    // Verificação de erro do Oracle Access Manager caso ainda ocorra
     if (textoTotal.includes('ORACLE ACCESS MANAGER') || textoTotal.includes('FATAL ERROR')) {
       return {
         sucesso: false,
         hasRecords: false,
         statusTexto: 'BLOQUEIO DE FIREWALL (OAM)',
-        mensagem: 'O portal da SESP-ES barrou a conexão automatizada via proxy/nuvem. É recomendado testar com proxy residencial ou IP fixo.'
+        mensagem: 'O portal da SESP-ES barrou a conexão automatizada via proxy/nuvem.'
       };
     }
 
@@ -239,4 +226,21 @@ export async function consultarAntecedentesPCES(dados) {
       hasRecords: false,
       statusTexto: 'RESPOSTA INDEFINIDA',
       mensagem: 'A automação disparou a consulta, mas o portal não retornou o atestado nem exibiu modais mapeados.',
-      rawSnippet:
+      rawSnippet: resultadoAnalise.texto.replace(/\s+/g, ' ').slice(0, 300)
+    };
+
+  } catch (error) {
+    console.error(`[PCES] Erro crítico na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCES',
+      mensagem: error.message
+    };
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCES] Navegador encerrado com sucesso.`);
+    }
+  }
+}
