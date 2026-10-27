@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCSC(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -17,8 +21,19 @@ export async function consultarAntecedentesPCSC(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCSC] Acessando Delegacia Virtual de Santa Catarina para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda o formulário renderizar na página
     await page.waitForSelector('form, input', { timeout: 15000 });
@@ -56,7 +71,6 @@ export async function consultarAntecedentesPCSC(dados) {
     const inputRg = await page.$('input[name*="rg" i], input[id*="rg" i]');
     if (inputRg) {
       let rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
-      // Remove o dígito verificador se vier junto (pega tudo antes do traço ou o penúltimo caractere se necessário)
       if (rgLimpo.length > 1) {
         rgLimpo = rgLimpo.slice(0, -1); 
       }
@@ -75,7 +89,7 @@ export async function consultarAntecedentesPCSC(dados) {
     if (btnSolicitar) {
       await Promise.all([
         btnSolicitar.click(),
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null)
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
       ]);
     } else {
       await page.keyboard.press('Enter');
@@ -112,7 +126,13 @@ export async function consultarAntecedentesPCSC(dados) {
       rawSnippet: resultadoTexto.slice(0, 300)
     };
 
+  } catch (error) {
+    console.error(`[PCSC] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCSC] Navegador encerrado com sucesso.`);
+    }
   }
 }
