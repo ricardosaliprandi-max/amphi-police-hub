@@ -106,7 +106,6 @@ export async function consultarAntecedentesPCMS(dados) {
       await page.evaluate((sel, valorTipo) => {
         const select = document.querySelector(sel) || document.querySelector('select');
         if (select) {
-          // Tenta encontrar a opção correspondente por valor ou texto
           for (let opt of select.options) {
             if (opt.value.toUpperCase().includes(valorTipo) || opt.text.toUpperCase().includes(valorTipo)) {
               select.value = opt.value;
@@ -122,7 +121,7 @@ export async function consultarAntecedentesPCMS(dados) {
       'input[name*="Documento" i]', 
       'input[id*="Documento" i]', 
       'input[name*="Cpf" i]', 
-      'input[id*="Rg" i]'
+      'input[name*="Rg" i]'
     ], docValor);
 
     // 6. Submissão segura (Tratando botões ASP.NET)
