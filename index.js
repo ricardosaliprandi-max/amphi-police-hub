@@ -25,7 +25,10 @@ app.get('/', (req, res) => {
 // 1. Rota Legada (Garante 100% de compatibilidade com a bancada AMPHI atual)
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
-    const dados = req.body;
+    const dados = req.body || {};
+    if (!dados.nome) {
+      return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
+    }
     console.log('[HUB] Consulta PCES via rota direta:', dados.nome);
     const resultado = await consultarAntecedentesPCES(dados);
     res.json(resultado);
@@ -40,9 +43,19 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. NOVA ROTA: Consulta em Lote / Sequencial (Evita estouro de memória no Render executando um por um)
+// 2. NOVA ROTA: Consulta em Lote / Sequencial (Com validação defensiva para req.body)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
-  const dados = req.body;
+  const dados = req.body || {};
+  
+  // Validação defensiva: se o body vier vazio ou sem nome, retorna erro amigável em vez de crashar
+  if (!dados.nome) {
+    return res.status(400).json({
+      sucesso: false,
+      statusTexto: 'REQUISIÇÃO INVÁLIDA',
+      mensagem: 'O corpo da requisição (JSON) está vazio ou não contém o campo "nome". Verifique se o Header "Content-Type: application/json" está configurado no Postman.'
+    });
+  }
+
   console.log('[HUB] Iniciando varredura sequencial para TODAS as UFs para:', dados.nome);
 
   try {
@@ -108,10 +121,14 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
   }
 });
 
-// 3. Rota Unificada Individual (Mantida para testes estado por estado)
+// 3. Rota Unificada Individual
 app.post('/api/v1/:uf/antecedentes', async (req, res) => {
   const uf = req.params.uf.toLowerCase().trim();
-  const dados = req.body;
+  const dados = req.body || {};
+
+  if (!dados.nome) {
+    return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
+  }
 
   console.log(`[HUB] Requisição multi-estado recebida para UF: ${uf.toUpperCase()}`);
 
