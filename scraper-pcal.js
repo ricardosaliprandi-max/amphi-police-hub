@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCAL(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -17,8 +21,19 @@ export async function consultarAntecedentesPCAL(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCAL] Acessando portal oficial para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // 1. Documento de Identificação (RG / CIN)
     if (dados.rg || dados.numero) {
@@ -34,7 +49,6 @@ export async function consultarAntecedentesPCAL(dados) {
       await page.focus('#orgaoExpedidor');
       await page.keyboard.type(String(dados.orgaoExpedidor || dados.expedidor).toUpperCase().trim(), { delay: 30 });
     } else {
-      // Fallback para órgão emissor padrão se o campo existir
       const inputOrgao = await page.$('#orgaoExpedidor');
       if (inputOrgao) {
         await page.focus('#orgaoExpedidor');
@@ -181,7 +195,13 @@ export async function consultarAntecedentesPCAL(dados) {
       mensagem: 'Não foi possível confirmar a emissão no portal da Polícia Civil de Alagoas.'
     };
 
+  } catch (error) {
+    console.error(`[PCAL] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCAL] Navegador encerrado com sucesso.`);
+    }
   }
 }
