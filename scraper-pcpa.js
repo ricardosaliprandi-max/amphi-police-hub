@@ -35,37 +35,58 @@ export async function consultarAntecedentesPCPA(dados) {
     console.log(`[PCPA] Acessando portal da Polícia Civil do Pará para: ${dados.nome}`);
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
-    // Aguarda o formulário carregar
-    await page.waitForSelector('form[action*="confirmacao"]', { timeout: 15000 });
+    // Aguarda o formulário carregar de forma genérica
+    await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
+
+    // Função auxiliar segura para preencher inputs
+    async function preencherCampo(seletor, valor) {
+      if (!valor) return;
+      try {
+        const el = await page.$(seletor);
+        if (el) {
+          await page.focus(seletor);
+          await page.evaluate(s => document.querySelector(s).value = '', seletor);
+          await page.type(seletor, String(valor), { delay: 30 });
+          return true;
+        }
+      } catch (e) {
+        // Ignora se não encontrar
+      }
+      return false;
+    }
 
     // 1. Preenchimento do Nome Completo
-    await page.type('input[name="nome"]', dados.nome.toUpperCase().trim(), { delay: 30 });
+    await preencherCampo('input[name="nome"], input[id*="nome" i]', dados.nome.toUpperCase().trim());
 
     // 2. Filiação (Pai e Mãe)
     if (dados.nomePai && !dados.nomePai.toUpperCase().includes('DECLARADO')) {
-      await page.type('input[name="pai"]', dados.nomePai.toUpperCase().trim(), { delay: 30 });
+      await preencherCampo('input[name="pai"], input[id*="pai" i]', dados.nomePai.toUpperCase().trim());
     }
     if (dados.nomeMae) {
-      await page.type('input[name="mae"]', dados.nomeMae.toUpperCase().trim(), { delay: 30 });
+      await preencherCampo('input[name="mae"], input[id*="mae" i]', dados.nomeMae.toUpperCase().trim());
     }
 
-    // 3. Naturalidade (Estado e Cidade - padrão Pará/Belém se não especificado)
-    await page.select('select[name="estado"]', '14'); // 14 = Pará conforme o HTML
-    await new Promise(r => setTimeout(r, 1000)); // Aguarda carregar as cidades via AJAX
-
-    // Seleciona a cidade (padrão Belém ID 4565 ou busca correspondente)
-    await page.select('select[name="cidade"]', '4565');
+    // 3. Naturalidade (Estado e Cidade)
+    try {
+      const selectEstado = await page.$('select[name="estado"]');
+      if (selectEstado) {
+        await page.select('select[name="estado"]', '14').catch(() => {});
+        await new Promise(r => setTimeout(r, 1000));
+        await page.select('select[name="cidade"]', '4565').catch(() => {});
+      }
+    } catch (e) {
+      // Se os selects forem dinâmicos ou diferentes, prossegue sem travar
+    }
 
     // 4. Dados de Documentação (RG e CPF)
     const rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
     if (rgLimpo) {
-      await page.type('input[name="rg"]', rgLimpo, { delay: 30 });
-      // Estado emissor do RG (padrão Pará ou UF informada)
-      await page.select('select[name="estado_emissor"]', '14');
+      await preencherCampo('input[name="rg"], input[id*="rg" i]', rgLimpo);
+      await page.select('select[name="estado_emissor"]', '14').catch(() => {});
     }
 
     const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
-    await page.type('input[name="cpf"]', cpfLimpo, { delay: 30 });
+    await preencherCampo('input[name="cpf"], input[id*="cpf" i]', cpfLimpo);
 
     // 5. Data de Nascimento (DD/MM/AAAA)
     let dataFormatada = dados.dataNascimento || '';
@@ -73,16 +94,26 @@ export async function consultarAntecedentesPCPA(dados) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
-    await page.type('input[name="dt_nascimento"]', dataFormatada, { delay: 40 });
+    await preencherCampo('input[name="dt_nascimento"], input[id*="nascimento" i]', dataFormatada);
 
-    // 6. Submissão do Formulário para a página de confirmação
+    // 6. Submissão do Formulário de forma segura
     console.log('[PCPA] Submetendo consulta...');
-    await Promise.all([
-      page.click('button.btn-primary'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null)
-    ]);
+    const botaoClicado = await page.evaluate(() => {
+      const btn = document.querySelector('button.btn-primary, button[type="submit"], input[type="submit"]');
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
 
-    // 7. Análise da página resultante (/confirmacao ou emissão)
+    if (!botaoClicado) {
+      await page.keyboard.press('Enter');
+    }
+
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+
+    // 7. Análise da página resultante
     const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
 
     if (resultadoTexto.toUpperCase().includes('NADA CONSTA') || resultadoTexto.toUpperCase().includes('CERTIDÃO NEGATIVA')) {
@@ -114,8 +145,13 @@ export async function consultarAntecedentesPCPA(dados) {
     };
 
   } catch (error) {
-    console.error(`[PCPA] Erro crítico na execução:`, error.message);
-    throw error;
+    console.error(`[PCPA] Erro na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCPA',
+      mensagem: error.message
+    };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
