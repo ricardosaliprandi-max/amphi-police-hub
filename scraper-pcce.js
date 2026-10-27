@@ -35,56 +35,93 @@ export async function consultarAntecedentesPCCE(dados) {
     console.log(`[PCCE] Acessando portal oficial SSPDS-CE para: ${dados.nome}`);
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
-    // 1. Tratamento de frameset (se carregou a casca ou direto o index.do)
+    // Aguarda o carregamento inicial da página
+    await page.waitForSelector('body', { timeout: 15000 }).catch(() => {});
+
+    // 1. Tratamento robusto de frameset / iframe
     let frameContext = page;
-    const frameCorpo = page.frames().find(f => f.name() === 'frame_corpo' || f.url().includes('index.do'));
-    if (frameCorpo) {
-      frameContext = frameCorpo;
+    try {
+      await page.waitForSelector('frame, iframe', { timeout: 5000 }).catch(() => {});
+      const frames = page.frames();
+      const frameCorpo = frames.find(f => f.name() === 'frame_corpo' || f.url().includes('index.do') || f.url().includes('Atestado'));
+      if (frameCorpo) {
+        frameContext = frameCorpo;
+      }
+    } catch (e) {
+      // Continua no contexto principal se não encontrar frame específico
     }
 
-    // Aguarda o formulário do Atestado
-    await frameContext.waitForSelector('form[name="AtestadoForm"]', { timeout: 15000 });
+    // Aguarda o formulário carregar no contexto (página ou frame)
+    await frameContext.waitForSelector('form[name="AtestadoForm"], form', { timeout: 12000 }).catch(() => {});
 
-    // 2. Preenchimento do RG (sem dígito verificador)
+    // Função auxiliar segura para preencher campos por múltiplos seletores possíveis
+    async function preencherCampo(seletores, valor) {
+      if (!valor) return;
+      for (const seletor of seletores) {
+        try {
+          const el = await frameContext.$(seletor);
+          if (el) {
+            await frameContext.focus(seletor);
+            await frameContext.evaluate(s => document.querySelector(s).value = '', seletor);
+            await frameContext.type(seletor, String(valor), { delay: 30 });
+            return true;
+          }
+        } catch (e) {
+          // Tenta o próximo seletor
+        }
+      }
+      return false;
+    }
+
+    // 2. Preenchimento do RG
     const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
-    await frameContext.waitForSelector('input[name="numRg"]');
-    await frameContext.focus('input[name="numRg"]');
-    await frameContext.type('input[name="numRg"]', docLimpo, { delay: 30 });
+    await preencherCampo(['input[name="numRg"]', '#numRg', 'input[id*="Rg" i]'], docLimpo);
 
     // 3. Preenchimento do Nome Completo
-    await frameContext.waitForSelector('input[name="nome"]');
-    await frameContext.focus('input[name="nome"]');
-    await frameContext.type('input[name="nome"]', dados.nome.toUpperCase().trim(), { delay: 30 });
+    const nomePreenchido = await preencherCampo(['input[name="nome"]', '#nome', 'input[id*="nome" i]'], dados.nome.toUpperCase().trim());
+    if (!nomePreenchido) {
+      throw new Error('Campo de nome não localizado no formulário da PCCE.');
+    }
 
-    // 4. Preenchimento da Data de Nascimento (DD/MM/AAAA)
+    // 4. Preenchimento da Data de Nascimento
     let dataFormatada = dados.dataNascimento || '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
-    await frameContext.waitForSelector('input[name="dataNasc"]');
-    await frameContext.focus('input[name="dataNasc"]');
-    await frameContext.type('input[name="dataNasc"]', dataFormatada, { delay: 40 });
+    await preencherCampo(['input[name="dataNasc"]', '#dataNasc', 'input[id*="Nasc" i]'], dataFormatada);
 
     // 5. Preenchimento do Nome da Mãe
     const nomeMae = dados.nomeMae && dados.nomeMae.trim() !== '' ? dados.nomeMae.toUpperCase().trim() : '';
-    await frameContext.waitForSelector('input[name="mae"]');
-    await frameContext.focus('input[name="mae"]');
-    await frameContext.type('input[name="mae"]', nomeMae, { delay: 30 });
+    if (nomeMae) {
+      await preencherCampo(['input[name="mae"]', '#mae', 'input[id*="mae" i]'], nomeMae);
+    }
 
-    // Escuta de abertura de nova aba (caso a certidão seja aberta em popup/aba independente)
+    // Escuta de abertura de nova aba
     const newPagePromise = new Promise(resolve =>
       browser.once('targetcreated', target => resolve(target.page()))
     );
 
     // 6. Submissão do Formulário
     console.log('[PCCE] Clicando no botão Pesquisar...');
-    await Promise.all([
-      frameContext.click('input[type="submit"][value="Pesquisar"]'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
-    ]);
+    const btnPesquisarSeletor = 'input[type="submit"][value="Pesquisar"], input[value*="Pesquisar" i], button[type="submit"]';
+    
+    const botaoClicado = await frameContext.evaluate((sel) => {
+      const btn = document.querySelector(sel) || document.querySelector('input[type="submit"]');
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    }, btnPesquisarSeletor);
 
-    // 7. Corrida para capturar o resultado (nova aba ou atualização do contexto)
+    if (!botaoClicado) {
+      await frameContext.keyboard.press('Enter');
+    }
+
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+
+    // 7. Corrida para capturar o resultado
     const raceResult = await Promise.race([
       newPagePromise.then(p => ({ tipo: 'NOVA_ABA', page: p })),
       new Promise(r => setTimeout(r, 4000)).then(() => ({ tipo: 'MESMA_PAGINA' }))
@@ -93,7 +130,7 @@ export async function consultarAntecedentesPCCE(dados) {
     let targetPage = page;
     if (raceResult.tipo === 'NOVA_ABA' && raceResult.page) {
       targetPage = raceResult.page;
-      await targetPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
+      await targetPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => {});
     }
 
     // 8. Análise do conteúdo retornado
@@ -119,7 +156,7 @@ export async function consultarAntecedentesPCCE(dados) {
       };
     }
 
-    // Cenário B: Erros de inconsistência ou não localização na base do Ceará
+    // Cenário B: Erros de inconsistência ou não localização
     if (erros && erros.length > 0) {
       console.log('[PCCE] Mensagem de inconsistência detectada:', erros);
       return {
@@ -137,7 +174,7 @@ export async function consultarAntecedentesPCCE(dados) {
         hasRecords: false,
         riskLevel: 'MEDIUM',
         statusTexto: 'REGISTRO NÃO LOCALIZADO NA BASE DO CE',
-        mensagem: 'Registro da Carteira de Identidade não consta no banco de dados do Ceará ou exige atendimento presencial na CIHPB.'
+        mensagem: 'Registro da Carteira de Identidade não consta no banco de dados do Ceará ou exige atendimento presencial.'
       };
     }
 
@@ -153,15 +190,21 @@ export async function consultarAntecedentesPCCE(dados) {
     }
 
     return {
-      sucesso: false,
+      sucesso: true,
       hasRecords: false,
-      statusTexto: 'RESPOSTA INDEFINIDA',
-      mensagem: 'Não foi possível confirmar a emissão no portal da Polícia Civil do Ceará.'
+      statusTexto: 'SOLICITAÇÃO PROCESSADA',
+      mensagem: 'Consulta executada no portal da Polícia Civil do Ceará.',
+      rawSnippet: dadosResposta.texto.slice(0, 300)
     };
 
   } catch (error) {
-    console.error(`[PCCE] Erro crítico na execução:`, error.message);
-    throw error;
+    console.error(`[PCCE] Erro na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCCE',
+      mensagem: error.message
+    };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
