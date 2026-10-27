@@ -33,69 +33,123 @@ export async function consultarAntecedentesPCRR(dados) {
     });
 
     console.log(`[PCRR] Acessando portal de antecedentes da PCRR para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    
+    // Tratamento defensivo de DNS/Timeout para o portal de Roraima
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(err => {
+      throw new Error(`Portal de Roraima inacessível ou fora do ar (DNS/Timeout): ${err.message}`);
+    });
 
-    // Aguarda o formulário ASP.NET carregar
-    await page.waitForSelector('input', { timeout: 15000 });
+    // Aguarda o formulário carregar de forma flexível
+    await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
 
-    // 1. Preenchimento do Nome Completo
-    const inputNome = await page.$('input[name*="Nome" i], input[id*="Nome" i]');
-    if (inputNome) {
-      await inputNome.type(dados.nome.toUpperCase().trim(), { delay: 30 });
+    // Função auxiliar segura para preencher inputs
+    async function preencherCampo(seletores, valor) {
+      if (!valor) return;
+      for (const sel of seletores) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await page.focus(sel);
+            await page.evaluate(s => document.querySelector(s).value = '', sel);
+            await page.type(sel, String(valor), { delay: 30 });
+            return true;
+          }
+        } catch (e) {
+          // Tenta o próximo
+        }
+      }
+      return false;
     }
 
+    // 1. Preenchimento do Nome Completo
+    await preencherCampo([
+      'input[name*="Nome" i]', 
+      'input[id*="Nome" i]', 
+      'input[name*="nome" i]'
+    ], dados.nome.toUpperCase().trim());
+
     // 2. Filiação 1 (Mãe)
-    const inputMae = await page.$('input[name*="Filiacao1" i], input[id*="Filiacao1" i]');
-    if (inputMae && dados.nomeMae) {
-      await inputMae.type(dados.nomeMae.toUpperCase().trim(), { delay: 30 });
+    if (dados.nomeMae) {
+      await preencherCampo([
+        'input[name*="Filiacao1" i]', 
+        'input[id*="Filiacao1" i]', 
+        'input[name*="Mae" i]', 
+        'input[id*="Mae" i]'
+      ], dados.nomeMae.toUpperCase().trim());
     }
 
     // 3. Filiação 2 (Pai) - Opcional
-    const inputPai = await page.$('input[name*="Filiacao2" i], input[id*="Filiacao2" i]');
-    if (inputPai && dados.nomePai && !dados.nomePai.toUpperCase().includes('DECLARADO')) {
-      await inputPai.type(dados.nomePai.toUpperCase().trim(), { delay: 30 });
+    if (dados.nomePai && dados.nomePai.trim() !== '' && !dados.nomePai.toUpperCase().includes('DECLARADO')) {
+      await preencherCampo([
+        'input[name*="Filiacao2" i]', 
+        'input[id*="Filiacao2" i]', 
+        'input[name*="Pai" i]', 
+        'input[id*="Pai" i]'
+      ], dados.nomePai.toUpperCase().trim());
     }
 
     // 4. Data de Nascimento
-    const inputData = await page.$('input[name*="Nascimento" i], input[id*="Nascimento" i]');
-    if (inputData) {
-      let dataFormatada = dados.dataNascimento || '';
-      if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
-        const [ano, mes, dia] = dataFormatada.split('-');
-        dataFormatada = `${dia}/${mes}/${ano}`;
-      }
-      await inputData.type(dataFormatada, { delay: 40 });
+    let dataFormatada = dados.dataNascimento || '';
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
+      const [ano, mes, dia] = dataFormatada.split('-');
+      dataFormatada = `${dia}/${mes}/${ano}`;
     }
+    await preencherCampo([
+      'input[name*="Nascimento" i]', 
+      'input[id*="Nascimento" i]', 
+      'input[name*="DataNasc" i]'
+    ], dataFormatada);
 
-    // 5. Tipo de Documento e Número (CPF como preferência)
+    // 5. Tipo de Documento e Número
     const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
     const rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
     const docValor = cpfLimpo || rgLimpo;
 
-    const selectTipoDoc = await page.$('select[name*="Tipo" i], select[id*="Tipo" i]');
+    const selectTipoDoc = await page.$('select[name*="Tipo" i], select[id*="Tipo" i], select');
     if (selectTipoDoc) {
-      await selectTipoDoc.select(cpfLimpo ? 'CPF' : 'RG');
+      await page.evaluate((valorTipo) => {
+        const select = document.querySelector('select[name*="Tipo" i], select[id*="Tipo" i], select');
+        if (select) {
+          for (let opt of select.options) {
+            if (opt.value.toUpperCase().includes(valorTipo) || opt.text.toUpperCase().includes(valorTipo)) {
+              select.value = opt.value;
+              select.dispatchEvent(new Event('change', { bubbles: true }));
+              break;
+            }
+          }
+        }
+      }, cpfLimpo ? 'CPF' : 'RG');
     }
 
-    const inputDoc = await page.$('input[name*="Documento" i], input[id*="Documento" i], input[name*="Cpf" i], input[name*="Rg" i]');
-    if (inputDoc) {
-      await inputDoc.type(docValor, { delay: 30 });
-    }
+    await preencherCampo([
+      'input[name*="Documento" i]', 
+      'input[id*="Documento" i]', 
+      'input[name*="Cpf" i]', 
+      'input[name*="Rg" i]'
+    ], docValor);
 
-    // 6. Submissão (Gerar Certidão)
+    // 6. Submissão segura
     console.log('[PCRR] Submetendo dados para emissão...');
-    const btnGerar = await page.$('input[value*="Gerar Certidão" i], input[type="submit"]');
-    if (btnGerar) {
-      await Promise.all([
-        btnGerar.click(),
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
-      ]);
-    } else {
+    const botaoClicado = await page.evaluate(() => {
+      const elementos = Array.from(document.querySelectorAll('input[type="submit"], button, input[type="button"]'));
+      const alvo = elementos.find(el => {
+        const val = (el.value || el.innerText || '').toLowerCase();
+        return val.includes('gerar') || val.includes('consultar') || val.includes('pesquisar') || val.includes('emitir');
+      });
+      if (alvo) {
+        alvo.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!botaoClicado) {
       await page.keyboard.press('Enter');
     }
 
-    // Aguarda processamento
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
     await new Promise(r => setTimeout(r, 4000));
+    
     const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
 
     if (resultadoTexto.toUpperCase().includes('NADA CONSTA') || resultadoTexto.toUpperCase().includes('CERTIDÃO NEGATIVA')) {
@@ -127,8 +181,13 @@ export async function consultarAntecedentesPCRR(dados) {
     };
 
   } catch (error) {
-    console.error(`[PCRR] Erro crítico na execução:`, error.message);
-    throw error;
+    console.error(`[PCRR] Erro na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCRR',
+      mensagem: error.message
+    };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
