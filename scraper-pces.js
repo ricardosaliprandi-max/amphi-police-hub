@@ -100,17 +100,21 @@ export async function consultarAntecedentesPCES(dados) {
     }
     await preencherInput('#dtNascimento_input', ['input[name*="Nascimento" i]', 'input[id*="Nascimento" i]'], dataFormatada, 40);
 
-    // Prepara escuta da segunda aba
-    const newPagePromise = new Promise(resolve => 
-      browser.once('targetcreated', target => resolve(target.page()))
-    );
+    // Prepara escuta de nova aba (pop-up de certidão)
+    let novaAba = null;
+    browser.once('targetcreated', async target => {
+      try {
+        const p = await target.page();
+        if (p) novaAba = p;
+      } catch (e) {}
+    });
 
     // 7. Dispara emissão
     console.log('[PCES] Clicando no botão Emitir Atestado...');
     const btnSeletor = '#btnPesquisar, input[value*="Pesquisar" i], button[type="submit"]';
     await page.waitForSelector(btnSeletor, { timeout: 10000 }).catch(() => {});
     
-    const botaoClicado = await page.evaluate((sel) => {
+    await page.evaluate((sel) => {
       const btn = document.querySelector(sel);
       if (btn) {
         btn.click();
@@ -119,62 +123,32 @@ export async function consultarAntecedentesPCES(dados) {
       return false;
     }, btnSeletor);
 
-    if (!botaoClicado) {
-      await page.keyboard.press('Enter');
+    // Aguarda o processamento do PrimeFaces / Ajax / Navegação
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Verifica se abriu nova aba com o documento
+    if (novaAba) {
+      try {
+        await novaAba.waitForLoadState ? await novaAba.waitForLoadState('domcontentloaded') : await new Promise(r => setTimeout(r, 2000));
+        const textoAba = await novaAba.evaluate(() => document.body.innerText || '');
+        if (textoAba.includes('NADA CONSTA') || textoAba.includes('ATESTADO DE ANTECEDENTES')) {
+          return {
+            sucesso: true,
+            hasRecords: false,
+            statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
+            mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
+            rawSnippet: textoAba.slice(0, 300)
+          };
+        }
+      } catch (err) {}
     }
 
-    // 8. Corrida: nova aba ou modal de erro
-    const raceResult = await Promise.race([
-      newPagePromise.then(p => ({ tipo: 'NOVA_ABA', page: p })),
-      page.waitForSelector('.ui-dialog:not(.ui-overlay-hidden), .ui-growl-message, div[id*="idt"]', { timeout: 15000 })
-        .then(() => ({ tipo: 'MODAL_ERRO' }))
-        .catch(() => ({ tipo: 'TIMEOUT' }))
-    ]);
-
-    // Cenário A: Nova aba com Nada Consta
-    if (raceResult.tipo === 'NOVA_ABA' && raceResult.page) {
-      const atestadoPage = raceResult.page;
-      await new Promise(r => setTimeout(r, 2000));
-      const corpoTexto = await atestadoPage.evaluate(() => document.body.innerText || '');
-      
-      console.log('[PCES] Nova aba capturada com sucesso!');
-      if (corpoTexto.includes('NADA CONSTA') || corpoTexto.includes('ATESTADO DE ANTECEDENTES')) {
-        return {
-          sucesso: true,
-          hasRecords: false,
-          statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
-          mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
-          rawSnippet: corpoTexto.slice(0, 300)
-        };
-      }
-    }
-
-    // Cenário B: Modais de Pendência ou Inconsistência
-    const modalBloqueioVisivel = await page.$eval('#j_idt101', el => el && !el.classList.contains('ui-overlay-hidden')).catch(() => false);
-    const modalInconsistenteVisivel = await page.$eval('#j_idt115', el => el && !el.classList.contains('ui-overlay-hidden')).catch(() => false);
-    const growlTexto = await page.$eval('#growlGeral', el => el ? el.innerText : '').catch(() => '');
-
-    if (modalBloqueioVisivel) {
-      console.log('[PCES] Alerta de pendência cadastral.');
-      return {
-        sucesso: true,
-        hasRecords: true,
-        riskLevel: 'HIGH',
-        statusTexto: 'NÃO FOI POSSÍVEL EMITIR CERTIDÃO NEGATIVA',
-        mensagem: 'Possível apontamento ou pendência na identificação criminal. O sistema oficial exige envio de documentos para atestado@pci.es.gov.br.'
-      };
-    }
-
-    if (modalInconsistenteVisivel) {
-      console.log('[PCES] Dados inconsistentes detectados.');
-      return {
-        sucesso: true,
-        hasRecords: false,
-        riskLevel: 'MEDIUM',
-        statusTexto: 'DADOS INCONSISTENTES',
-        mensagem: 'Dados informados divergem dos registros cadastrais do Instituto de Identificação do ES.'
-      };
-    }
+    // Lê o conteúdo da página principal após a submissão
+    const corpoTexto = await page.evaluate(() => document.body.innerText || '');
+    const growlTexto = await page.evaluate(() => {
+      const growl = document.querySelector('.ui-growl-message, .ui-messages-error, .ui-messages-warn');
+      return growl ? growl.innerText : '';
+    });
 
     if (growlTexto) {
       return {
@@ -185,11 +159,33 @@ export async function consultarAntecedentesPCES(dados) {
       };
     }
 
+    if (corpoTexto.toUpperCase().includes('NADA CONSTA') || corpoTexto.toUpperCase().includes('CERTIDÃO NEGATIVA')) {
+      return {
+        sucesso: true,
+        hasRecords: false,
+        statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
+        mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
+        rawSnippet: corpoTexto.slice(0, 300)
+      };
+    }
+
+    if (corpoTexto.toUpperCase().includes('EXISTEM REGISTROS') || corpoTexto.toUpperCase().includes('APONTAMENTO')) {
+      return {
+        sucesso: true,
+        hasRecords: true,
+        riskLevel: 'HIGH',
+        statusTexto: 'REGISTRO LOCALIZADO',
+        mensagem: 'Identificado registro de antecedentes criminais na base da PCES.'
+      };
+    }
+
+    // Retorna um snippet do texto capturado para diagnóstico imediato se cair aqui novamente
     return {
       sucesso: false,
       hasRecords: false,
       statusTexto: 'RESPOSTA INDEFINIDA',
-      mensagem: 'Não foi possível confirmar o atestado nem capturar mensagem de erro.'
+      mensagem: 'A página respondeu, mas os termos de certidão não foram identificados.',
+      rawSnippet: corpoTexto.replace(/\s+/g, ' ').slice(0, 300)
     };
 
   } catch (error) {
