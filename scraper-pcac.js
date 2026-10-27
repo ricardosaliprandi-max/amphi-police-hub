@@ -10,6 +10,10 @@ export async function consultarAntecedentesPCAC(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para rodar de forma leve no limite de RAM do Render
       '--disable-gpu'
     ]
   });
@@ -18,8 +22,19 @@ export async function consultarAntecedentesPCAC(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Intercepta e bloqueia recursos pesados para economizar RAM e CPU drasticamente
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCAC] Acessando portal oficial para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // 1. Preenchimento do RG (se houver)
     if (dados.rg || dados.numero) {
@@ -107,7 +122,6 @@ export async function consultarAntecedentesPCAC(dados) {
       const linhasTabela = await page.$$eval('#corpoTabelaModalResultados tr', rows => rows.length).catch(() => 0);
 
       if (linhasTabela > 0) {
-        // Tenta acionar a primeira ação de download/impressão da linha retornada
         const primeiroBotaoAcao = await page.$('#corpoTabelaModalResultados tr:first-child a, #corpoTabelaModalResultados tr:first-child button');
         if (primeiroBotaoAcao) {
           await primeiroBotaoAcao.click();
@@ -160,7 +174,13 @@ export async function consultarAntecedentesPCAC(dados) {
       mensagem: 'Não foi possível confirmar a emissão no portal da Polícia Civil do Acre.'
     };
 
+  } catch (error) {
+    console.error(`[PCAC] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCAC] Navegador encerrado com sucesso.`);
+    }
   }
 }
