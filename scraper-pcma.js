@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCMA(dados) {
-  // URL padrão oficial de antecedentes do Maranhão (ajuste se houver subdiretório específico no deploy)
+  // URL padrão oficial de antecedentes do Maranhão
   const URL_ALVO = 'https://antecedentes.ssp.ma.gov.br';
 
   const browser = await puppeteer.launch({
@@ -10,6 +10,10 @@ export async function consultarAntecedentesPCMA(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite restrito de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -18,8 +22,19 @@ export async function consultarAntecedentesPCMA(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCMA] Acessando portal de antecedentes da SSP-MA para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda a aplicação SPA renderizar os componentes do formulário no DOM
     await page.waitForSelector('input', { timeout: 15000 });
@@ -98,7 +113,13 @@ export async function consultarAntecedentesPCMA(dados) {
       rawSnippet: resultadoTexto.slice(0, 300)
     };
 
+  } catch (error) {
+    console.error(`[PCMA] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCMA] Navegador encerrado com sucesso.`);
+    }
   }
 }
