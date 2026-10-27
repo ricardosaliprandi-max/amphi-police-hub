@@ -35,33 +35,69 @@ export async function consultarAntecedentesPCPE(dados) {
     console.log(`[PCPE] Acessando portal do IITB / PCPE para: ${dados.nome}`);
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
-    // Aguarda o formulário JSF carregar
-    await page.waitForSelector('form#formBody', { timeout: 15000 });
+    // Aguarda o formulário JSF ou qualquer input carregar de forma flexível
+    await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
+
+    // Função auxiliar segura para preencher campos por seletor parcial do JSF
+    async function preencherCampo(seletorSufixo, valor, delay = 30) {
+      if (!valor) return;
+      const seletores = [`input[id$="${seletorSufixo}"]`, `input[name*="${seletorSufixo}" i]`, `input[id*="${seletorSufixo}" i]`];
+      for (const sel of seletores) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await page.focus(sel);
+            await page.evaluate(s => document.querySelector(s).value = '', sel);
+            await page.type(sel, String(valor), { delay });
+            return true;
+          }
+        } catch (e) {
+          // Tenta o próximo
+        }
+      }
+      return false;
+    }
+
+    // Função auxiliar segura para selects PrimeFaces
+    async function selecionarCampo(seletorSufixo, valorOpcao) {
+      if (!valorOpcao) return;
+      const seletores = [`select[id$="${seletorSufixo}"]`, `select[id*="${seletorSufixo}" i]`];
+      for (const sel of seletores) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await page.select(sel, String(valorOpcao)).catch(() => {});
+            return true;
+          }
+        } catch (e) {
+          // Tenta o próximo
+        }
+      }
+      return false;
+    }
 
     // 1. Dados Pessoais
-    await page.type('input[id$="campoNome"]', dados.nome.toUpperCase().trim(), { delay: 30 });
+    await preencherCampo('campoNome', dados.nome.toUpperCase().trim(), 30);
     
     if (dados.nomeMae) {
-      await page.type('input[id$="campoNomeMae"]', dados.nomeMae.toUpperCase().trim(), { delay: 30 });
+      await preencherCampo('campoNomeMae', dados.nomeMae.toUpperCase().trim(), 30);
     }
     if (dados.nomePai && !dados.nomePai.toUpperCase().includes('DECLARADO')) {
-      await page.type('input[id$="campoNomePai"]', dados.nomePai.toUpperCase().trim(), { delay: 30 });
+      await preencherCampo('campoNomePai', dados.nomePai.toUpperCase().trim(), 30);
     }
 
-    // Profissão (padrão 'OUTROS' ou 'NÃO INFORMADA' se não houver)
+    // Profissão
     const profissao = dados.profissao || 'AUTONOMO';
-    await page.type('input[id$="campoProfissao"]', profissao.toUpperCase(), { delay: 20 });
+    await preencherCampo('campoProfissao', profissao.toUpperCase(), 20);
 
     // Nacionalidade e Naturalidade
-    await page.type('input[id$="campoNacionalidade"]', 'BRASILEIRA', { delay: 20 });
+    await preencherCampo('campoNacionalidade', 'BRASILEIRA', 20);
     const naturalidade = dados.naturalidade || 'RECIFE';
-    await page.type('input[id$="campoNaturalidade"]', naturalidade.toUpperCase(), { delay: 20 });
+    await preencherCampo('campoNaturalidade', naturalidade.toUpperCase(), 20);
 
-    // UF Naturalidade (Select PrimeFaces)
-    await page.select('select[id$="campoUfNaturalidade_input"]', '17'); // 17 = PE por padrão ou UF informada
-
-    // Estado Civil (Valor '1' = Solteiro(a), '2' = Casado(a))
-    await page.select('select[id$="campoEstadoCivil_input"]', '1');
+    // UF Naturalidade e Estado Civil
+    await selecionarCampo('campoUfNaturalidade_input', '17');
+    await selecionarCampo('campoEstadoCivil_input', '1');
 
     // Data de Nascimento (DD/MM/AAAA)
     let dataNascFormatada = dados.dataNascimento || '';
@@ -69,43 +105,49 @@ export async function consultarAntecedentesPCPE(dados) {
       const [ano, mes, dia] = dataNascFormatada.split('-');
       dataNascFormatada = `${dia}/${mes}/${ano}`;
     }
-    await page.type('input[id$="campoDataNascimento_input"]', dataNascFormatada, { delay: 30 });
+    await preencherCampo('campoDataNascimento_input', dataNascFormatada, 30);
 
     // CPF
     const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
-    await page.type('input[id$="campoCpf"]', cpfLimpo, { delay: 30 });
+    await preencherCampo('campoCpf', cpfLimpo, 30);
 
-    // Sexo ('1' = Masculino, '2' = Feminino)
+    // Sexo
     if (dados.sexo) {
       const sexoVal = dados.sexo.toUpperCase().startsWith('F') ? '2' : '1';
-      await page.select('select[id$="campoSexo_input"]', sexoVal);
+      await selecionarCampo('campoSexo_input', sexoVal);
     }
 
     // 2. Dados do RG
     const rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
     if (rgLimpo) {
-      await page.type('input[id$="campoRg"]', rgLimpo, { delay: 30 });
-      // Órgão Emissor (1 = SSP)
-      await page.select('select[id$="campoOrgaoEmissor_input"]', '1');
-      // UF do RG (17 = PE ou UF correspondente)
-      await page.select('select[id$="campoUf_input"]', '17');
+      await preencherCampo('campoRg', rgLimpo, 30);
+      await selecionarCampo('campoOrgaoEmissor_input', '1');
+      await selecionarCampo('campoUf_input', '17');
     }
 
-    // 3. Endereço (Preenchimento com dados padrão estruturais)
-    await page.type('input[id$="endereco_cep"]', '50000000', { delay: 20 });
-    await page.type('input[id$="endereco_rua"]', 'AVENIDA CENTRAL', { delay: 20 });
-    await page.type('input[id$="endereco_bairro"]', 'CENTRO', { delay: 20 });
-    await page.type('input[id$="endereco_cidade"]', 'RECIFE', { delay: 20 });
-    await page.select('select[id$="certidao_antecedentes_criminais_endereco_pernambuco_input"]', '17');
+    // 3. Endereço (Preenchimento padrão estrutural)
+    await preencherCampo('endereco_cep', '50000000', 20);
+    await preencherCampo('endereco_rua', 'AVENIDA CENTRAL', 20);
+    await preencherCampo('endereco_bairro', 'CENTRO', 20);
+    await preencherCampo('endereco_cidade', 'RECIFE', 20);
+    await selecionarCampo('certidao_antecedentes_criminais_endereco_pernambuco_input', '17');
 
-    // 4. Submissão (Clicar no botão "Solicitar")
+    // 4. Submissão segura (Clicar no botão de solicitação)
     console.log('[PCPE] Submetendo requisição de certidão...');
-    await Promise.all([
-      page.click('button[id$="j_idt97"]'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null)
-    ]);
+    const botaoClicado = await page.evaluate(() => {
+      const btn = document.querySelector('button[id$="j_idt97"], button[type="submit"], input[type="submit"]');
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
 
-    // Aguarda processamento do JSF
+    if (!botaoClicado) {
+      await page.keyboard.press('Enter');
+    }
+
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null);
     await new Promise(r => setTimeout(r, 4000));
 
     const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
@@ -139,8 +181,13 @@ export async function consultarAntecedentesPCPE(dados) {
     };
 
   } catch (error) {
-    console.error(`[PCPE] Erro crítico na execução:`, error.message);
-    throw error;
+    console.error(`[PCPE] Erro na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCPE',
+      mensagem: error.message
+    };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
