@@ -3,25 +3,28 @@ import puppeteer from 'puppeteer';
 export async function consultarAntecedentesPCES(dados) {
   const URL_ALVO = 'https://ssp.sesp.es.gov.br/rgantecedentes/xhtml/pesquisaantecedentes.jsf';
   
-  const browser = await puppeteer.launch({
-    headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu',
-      '--disable-infobars',
-      '--window-size=1280,800',
-      '--disable-blink-features=AutomationControlled'
-    ]
-  });
+  let browser = null;
+  let page = null;
+  let novaAba = null;
 
   try {
-    const page = await browser.newPage();
+    browser = await puppeteer.launch({
+      headless: 'new',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu',
+        '--disable-infobars',
+        '--window-size=1280,800',
+        '--disable-blink-features=AutomationControlled'
+      ]
+    });
+
+    page = await browser.newPage();
     
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
     
@@ -47,7 +50,8 @@ export async function consultarAntecedentesPCES(dados) {
       }
     });
     
-    console.log(`[PCES] Acessando portal oficial com camuflagem anti-bot para: ${dados.nome}`);
+    const nomeBusca = dados?.nome || 'Cidadão';
+    console.log(`[PCES] Acessando portal oficial com camuflagem anti-bot para: ${nomeBusca}`);
     
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(err => {
       throw new Error(`Falha de conexão com o portal da SESP-ES: ${err.message}`);
@@ -58,7 +62,7 @@ export async function consultarAntecedentesPCES(dados) {
     });
 
     let tipoDocValue = "1";
-    const docTipoDesejado = (dados.tipoDocumento || 'RG').toUpperCase();
+    const docTipoDesejado = (dados?.tipoDocumento || 'RG').toUpperCase();
     if (docTipoDesejado.includes('CNH')) tipoDocValue = "7";
     if (docTipoDesejado.includes('CIN')) tipoDocValue = "12";
 
@@ -72,64 +76,101 @@ export async function consultarAntecedentesPCES(dados) {
         }
       }
     }, tipoDocValue);
-    await new Promise(r => setTimeout(r, 800));
 
-    const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
+    await new Promise(r => setTimeout(r, 500));
+
+    const docLimpo = String(dados?.rg || dados?.numero || '').replace(/\D/g, '');
     if (docLimpo) {
-      await page.focus('#numero');
-      await page.evaluate(() => document.querySelector('#numero').value = '');
-      await page.type('#numero', docLimpo, { delay: 40 });
+      await page.waitForSelector('#numero', { timeout: 5000 }).catch(() => {});
+      await page.evaluate((val) => {
+        const el = document.querySelector('#numero');
+        if (el) {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, docLimpo);
     }
 
-    if (dados.nome) {
-      await page.focus('#nomeIndividuo');
-      await page.evaluate(() => document.querySelector('#nomeIndividuo').value = '');
-      await page.type('#nomeIndividuo', dados.nome.toUpperCase().trim(), { delay: 30 });
+    if (dados?.nome) {
+      await page.waitForSelector('#nomeIndividuo', { timeout: 5000 }).catch(() => {});
+      await page.evaluate((val) => {
+        const el = document.querySelector('#nomeIndividuo');
+        if (el) {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, dados.nome.toUpperCase().trim());
     }
 
-    if (dados.nomePai && dados.nomePai.trim() !== '' && !dados.nomePai.toUpperCase().includes('NÃO DECLARADO') && !dados.nomePai.toUpperCase().includes('NAO DECLARADO')) {
-      await page.focus('#nomePai');
-      await page.evaluate(() => document.querySelector('#nomePai').value = '');
-      await page.type('#nomePai', dados.nomePai.toUpperCase().trim(), { delay: 30 });
+    if (dados?.nomePai && dados.nomePai.trim() !== '' && !dados.nomePai.toUpperCase().includes('NÃO DECLARADO') && !dados.nomePai.toUpperCase().includes('NAO DECLARADO')) {
+      await page.waitForSelector('#nomePai', { timeout: 5000 }).catch(() => {});
+      await page.evaluate((val) => {
+        const el = document.querySelector('#nomePai');
+        if (el) {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, dados.nomePai.toUpperCase().trim());
     }
 
-    if (dados.nomeMae && dados.nomeMae.trim() !== '') {
-      await page.focus('#nomeMae');
-      await page.evaluate(() => document.querySelector('#nomeMae').value = '');
-      await page.type('#nomeMae', dados.nomeMae.toUpperCase().trim(), { delay: 30 });
+    if (dados?.nomeMae && dados.nomeMae.trim() !== '') {
+      await page.waitForSelector('#nomeMae', { timeout: 5000 }).catch(() => {});
+      await page.evaluate((val) => {
+        const el = document.querySelector('#nomeMae');
+        if (el) {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, dados.nomeMae.toUpperCase().trim());
     }
 
-    let dataFormatada = dados.dataNascimento || '';
+    let dataFormatada = dados?.dataNascimento || '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
     if (dataFormatada) {
-      await page.focus('#dtNascimento_input');
-      await page.evaluate(() => document.querySelector('#dtNascimento_input').value = '');
-      await page.type('#dtNascimento_input', dataFormatada, { delay: 40 });
+      await page.waitForSelector('#dtNascimento_input', { timeout: 5000 }).catch(() => {});
+      await page.evaluate((val) => {
+        const el = document.querySelector('#dtNascimento_input');
+        if (el) {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }, dataFormatada);
     }
 
-    let novaAba = null;
-    browser.once('targetcreated', async target => {
-      try {
-        const p = await target.page();
-        if (p) novaAba = p;
-      } catch (e) {}
+    const targetPromise = new Promise(resolve => {
+      browser.once('targetcreated', async target => {
+        try {
+          const p = await target.page();
+          resolve(p);
+        } catch (e) {
+          resolve(null);
+        }
+      });
+      setTimeout(() => resolve(null), 8000);
     });
 
     console.log('[PCES] Disparando botão Emitir Atestado...');
     await page.click('#btnPesquisar').catch(async () => {
-      await page.evaluate(() => document.getElementById('btnPesquisar').click());
+      await page.evaluate(() => document.getElementById('btnPesquisar')?.click());
     });
 
-    await new Promise(r => setTimeout(r, 6000));
+    novaAba = await targetPromise;
 
     if (novaAba) {
       try {
-        await new Promise(r => setTimeout(r, 2000));
+        await novaAba.waitForLoadState ? novaAba.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {}) : new Promise(r => setTimeout(r, 2000));
         const textoAba = await novaAba.evaluate(() => document.body.innerText || '');
         if (textoAba.includes('NADA CONSTA') || textoAba.includes('ATESTADO DE ANTECEDENTES') || textoAba.includes('CERTIDÃO')) {
+          await novaAba.close().catch(() => {});
+          novaAba = null;
           return {
             sucesso: true,
             hasRecords: false,
@@ -138,7 +179,14 @@ export async function consultarAntecedentesPCES(dados) {
             rawSnippet: textoAba.slice(0, 300)
           };
         }
-      } catch (e) {}
+      } catch (e) {
+        // Fallback to main page evaluation
+      } finally {
+        if (novaAba) {
+          await novaAba.close().catch(() => {});
+          novaAba = null;
+        }
+      }
     }
 
     const resultadoAnalise = await page.evaluate(() => {
@@ -230,14 +278,17 @@ export async function consultarAntecedentesPCES(dados) {
     };
 
   } catch (error) {
-    console.error(`[PCES] Erro crítico na execução:`, error.message);
+    console.error(`[PCES] Erro crítico na execução:`, error?.message || error);
     return {
       sucesso: false,
       hasRecords: false,
       statusTexto: 'FALHA NA EXECUÇÃO PCES',
-      mensagem: error.message
+      mensagem: error?.message || 'Erro desconhecido'
     };
   } finally {
+    if (novaAba) {
+      await novaAba.close().catch(() => {});
+    }
     if (browser) {
       await browser.close().catch(() => {});
       console.log(`[PCES] Navegador encerrado com sucesso.`);
