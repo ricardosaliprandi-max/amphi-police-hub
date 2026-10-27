@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCCE(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -17,8 +21,19 @@ export async function consultarAntecedentesPCCE(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCCE] Acessando portal oficial SSPDS-CE para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // 1. Tratamento de frameset (se carregou a casca ou direto o index.do)
     let frameContext = page;
@@ -66,7 +81,7 @@ export async function consultarAntecedentesPCCE(dados) {
     console.log('[PCCE] Clicando no botão Pesquisar...');
     await Promise.all([
       frameContext.click('input[type="submit"][value="Pesquisar"]'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null)
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
     ]);
 
     // 7. Corrida para capturar o resultado (nova aba ou atualização do contexto)
@@ -78,7 +93,7 @@ export async function consultarAntecedentesPCCE(dados) {
     let targetPage = page;
     if (raceResult.tipo === 'NOVA_ABA' && raceResult.page) {
       targetPage = raceResult.page;
-      await targetPage.waitForNavigation({ waitUntil: 'networkidle2', timeout: 10000 }).catch(() => null);
+      await targetPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 10000 }).catch(() => null);
     }
 
     // 8. Análise do conteúdo retornado
@@ -144,7 +159,13 @@ export async function consultarAntecedentesPCCE(dados) {
       mensagem: 'Não foi possível confirmar a emissão no portal da Polícia Civil do Ceará.'
     };
 
+  } catch (error) {
+    console.error(`[PCCE] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCCE] Navegador encerrado com sucesso.`);
+    }
   }
 }
