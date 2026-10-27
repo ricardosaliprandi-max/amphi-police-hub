@@ -1,7 +1,7 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCPE(dados) {
-  const URL_ALVO = 'https://www.sds.pe.gov.br/antecedentes/'; // URL base oficial do portal da PCPE / IITB
+  const URL_ALVO = 'https://www.sds.pe.gov.br/antecedentes/';
 
   const browser = await puppeteer.launch({
     headless: 'new',
@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCPE(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -17,8 +21,19 @@ export async function consultarAntecedentesPCPE(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCPE] Acessando portal do IITB / PCPE para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda o formulário JSF carregar
     await page.waitForSelector('form#formBody', { timeout: 15000 });
@@ -45,7 +60,7 @@ export async function consultarAntecedentesPCPE(dados) {
     // UF Naturalidade (Select PrimeFaces)
     await page.select('select[id$="campoUfNaturalidade_input"]', '17'); // 17 = PE por padrão ou UF informada
 
-    // Estado Civil (Valor '1' = Solteiro(a), '2' = Casado(a) - selecionamos Solteiro por segurança padrão se omitido)
+    // Estado Civil (Valor '1' = Solteiro(a), '2' = Casado(a))
     await page.select('select[id$="campoEstadoCivil_input"]', '1');
 
     // Data de Nascimento (DD/MM/AAAA)
@@ -76,7 +91,7 @@ export async function consultarAntecedentesPCPE(dados) {
       await page.select('select[id$="campoUf_input"]', '17');
     }
 
-    // 3. Endereço (Preenchimento com dados padrão estruturais caso o SaaS não exija estrito)
+    // 3. Endereço (Preenchimento com dados padrão estruturais)
     await page.type('input[id$="endereco_cep"]', '50000000', { delay: 20 });
     await page.type('input[id$="endereco_rua"]', 'AVENIDA CENTRAL', { delay: 20 });
     await page.type('input[id$="endereco_bairro"]', 'CENTRO', { delay: 20 });
@@ -87,7 +102,7 @@ export async function consultarAntecedentesPCPE(dados) {
     console.log('[PCPE] Submetendo requisição de certidão...');
     await Promise.all([
       page.click('button[id$="j_idt97"]'),
-      page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 25000 }).catch(() => null)
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null)
     ]);
 
     // Aguarda processamento do JSF
@@ -123,7 +138,13 @@ export async function consultarAntecedentesPCPE(dados) {
       rawSnippet: resultadoTexto.slice(0, 300)
     };
 
+  } catch (error) {
+    console.error(`[PCPE] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCPE] Navegador encerrado com sucesso.`);
+    }
   }
 }
