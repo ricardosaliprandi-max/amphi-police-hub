@@ -36,71 +36,70 @@ export async function consultarAntecedentesPCES(dados) {
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda o formulário carregar
-    await page.waitForSelector('input, select', { timeout: 15000 }).catch(() => {});
+    await page.waitForSelector('#formMaster', { timeout: 15000 }).catch(() => {});
 
-    // 1. Tipo de documento no PrimeFaces (1 = RG, 7 = CNH, 12 = CIN)
-    let tipoDocValue = "1";
-    if (dados.tipoDocumento === 'CNH') tipoDocValue = "7";
-    if (dados.tipoDocumento === 'CIN') tipoDocValue = "12";
+    // 1. Seleção Correta do Tipo de Documento no PrimeFaces do ES
+    let tipoDocValue = "1"; // Padrão RG
+    const docTipoDesejado = (dados.tipoDocumento || 'RG').toUpperCase();
+    if (docTipoDesejado.includes('CNH')) tipoDocValue = "7";
+    if (docTipoDesejado.includes('CIN')) tipoDocValue = "12";
 
-    const selectDocSeletor = '#j_idt57_input, select[id*="idt57" i], select';
-    await page.waitForSelector(selectDocSeletor, { timeout: 10000 }).catch(() => {});
-    await page.select(selectDocSeletor, tipoDocValue).catch(() => {});
-    
-    await page.evaluate(() => {
-      const selects = document.querySelectorAll('select');
-      if (selects.length > 0) {
-        selects[0].dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    });
-    await new Promise(r => setTimeout(r, 600));
-
-    // Função auxiliar segura para preencher inputs
-    async function preencherInput(seletorPadrao, seletoresAlternativos, valor, delay = 30) {
-      if (!valor) return;
-      const todos = [seletorPadrao, ...seletoresAlternativos];
-      for (const sel of todos) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            await page.focus(sel);
-            await page.evaluate(s => document.querySelector(s).value = '', sel);
-            await page.type(sel, String(valor), { delay });
-            return true;
-          }
-        } catch (e) {
-          // Tenta o próximo
+    await page.evaluate((val) => {
+      const select = document.querySelector('#j_idt57_input');
+      if (select) {
+        select.value = val;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        // Força atualização do widget PrimeFaces se disponível
+        if (typeof widget_j_idt57 !== 'undefined' && widget_j_idt57.selectValue) {
+          widget_j_idt57.selectValue(val);
         }
       }
-      return false;
-    }
+    }, tipoDocValue);
+    await new Promise(r => setTimeout(r, 1000));
 
-    // 2. Número do Documento
+    // 2. Preenchimento de Inputs com base nos IDs exatos do HTML
+    // Número do Documento (#numero)
     const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
-    await preencherInput('#numero', ['input[name*="numero" i]', 'input[id*="numero" i]'], docLimpo, 40);
-
-    // 3. Nome Completo
-    await preencherInput('#nomeIndividuo', ['input[name*="nome" i]', 'input[id*="nome" i]'], dados.nome.toUpperCase().trim(), 30);
-
-    // 4. Nome do Pai (opcional)
-    if (dados.nomePai && dados.nomePai.trim() !== '' && dados.nomePai.toUpperCase() !== 'NÃO DECLARADO' && dados.nomePai.toUpperCase() !== 'NAO DECLARADO') {
-      await preencherInput('#nomePai', ['input[name*="Pai" i]', 'input[id*="Pai" i]'], dados.nomePai.toUpperCase().trim(), 30);
+    if (docLimpo) {
+      await page.focus('#numero');
+      await page.evaluate(() => document.querySelector('#numero').value = '');
+      await page.type('#numero', docLimpo, { delay: 40 });
     }
 
-    // 5. Nome da Mãe
+    // Nome Completo (#nomeIndividuo)
+    if (dados.nome) {
+      await page.focus('#nomeIndividuo');
+      await page.evaluate(() => document.querySelector('#nomeIndividuo').value = '');
+      await page.type('#nomeIndividuo', dados.nome.toUpperCase().trim(), { delay: 30 });
+    }
+
+    // Nome do Pai (#nomePai) - Opcional
+    if (dados.nomePai && dados.nomePai.trim() !== '' && !dados.nomePai.toUpperCase().includes('NÃO DECLARADO') && !dados.nomePai.toUpperCase().includes('NAO DECLARADO')) {
+      await page.focus('#nomePai');
+      await page.evaluate(() => document.querySelector('#nomePai').value = '');
+      await page.type('#nomePai', dados.nomePai.toUpperCase().trim(), { delay: 30 });
+    }
+
+    // Nome da Mãe (#nomeMae)
     if (dados.nomeMae && dados.nomeMae.trim() !== '') {
-      await preencherInput('#nomeMae', ['input[name*="Mae" i]', 'input[id*="Mae" i]'], dados.nomeMae.toUpperCase().trim(), 30);
+      await page.focus('#nomeMae');
+      await page.evaluate(() => document.querySelector('#nomeMae').value = '');
+      await page.type('#nomeMae', dados.nomeMae.toUpperCase().trim(), { delay: 30 });
     }
 
-    // 6. Data de Nascimento (formato DD/MM/AAAA)
+    // Data de Nascimento (#dtNascimento_input) - Formato DD/MM/AAAA
     let dataFormatada = dados.dataNascimento || '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
-    await preencherInput('#dtNascimento_input', ['input[name*="Nascimento" i]', 'input[id*="Nascimento" i]'], dataFormatada, 40);
+    if (dataFormatada) {
+      await page.focus('#dtNascimento_input');
+      await page.evaluate(() => document.querySelector('#dtNascimento_input').value = '');
+      await page.type('#dtNascimento_input', dataFormatada, { delay: 40 });
+    }
 
-    // Prepara escuta de nova aba (pop-up de certidão)
+    // Escuta por nova aba (caso abra o atestado em PDF/pop-up)
     let novaAba = null;
     browser.once('targetcreated', async target => {
       try {
@@ -109,29 +108,22 @@ export async function consultarAntecedentesPCES(dados) {
       } catch (e) {}
     });
 
-    // 7. Dispara emissão
-    console.log('[PCES] Clicando no botão Emitir Atestado...');
-    const btnSeletor = '#btnPesquisar, input[value*="Pesquisar" i], button[type="submit"]';
-    await page.waitForSelector(btnSeletor, { timeout: 10000 }).catch(() => {});
-    
-    await page.evaluate((sel) => {
-      const btn = document.querySelector(sel);
-      if (btn) {
-        btn.click();
-        return true;
-      }
-      return false;
-    }, btnSeletor);
+    // 3. Disparar a Pesquisa clicando no botão oficial #btnPesquisar
+    console.log('[PCES] Disparando botão Emitir Atestado...');
+    await page.click('#btnPesquisar').catch(async () => {
+      // Fallback via evaluate se o clique direto falhar
+      await page.evaluate(() => document.getElementById('btnPesquisar').click());
+    });
 
-    // Aguarda o processamento do PrimeFaces / Ajax / Navegação
-    await new Promise(r => setTimeout(r, 5000));
+    // Aguarda o processamento do AJAX e renderização de modais / nova aba
+    await new Promise(r => setTimeout(r, 6000));
 
-    // Verifica se abriu nova aba com o documento
+    // Se abriu nova aba com o resultado
     if (novaAba) {
       try {
-        await novaAba.waitForLoadState ? await novaAba.waitForLoadState('domcontentloaded') : await new Promise(r => setTimeout(r, 2000));
+        await new Promise(r => setTimeout(r, 2000));
         const textoAba = await novaAba.evaluate(() => document.body.innerText || '');
-        if (textoAba.includes('NADA CONSTA') || textoAba.includes('ATESTADO DE ANTECEDENTES')) {
+        if (textoAba.includes('NADA CONSTA') || textoAba.includes('ATESTADO DE ANTECEDENTES') || textoAba.includes('CERTIDÃO')) {
           return {
             sucesso: true,
             hasRecords: false,
@@ -140,36 +132,75 @@ export async function consultarAntecedentesPCES(dados) {
             rawSnippet: textoAba.slice(0, 300)
           };
         }
-      } catch (err) {}
+      } catch (e) {}
     }
 
-    // Lê o conteúdo da página principal após a submissão
-    const corpoTexto = await page.evaluate(() => document.body.innerText || '');
-    const growlTexto = await page.evaluate(() => {
-      const growl = document.querySelector('.ui-growl-message, .ui-messages-error, .ui-messages-warn');
-      return growl ? growl.innerText : '';
+    // 4. Verificação de Modais de Bloqueio ou Erro baseados nos IDs exatos do HTML
+    const resultadoAnalise = await page.evaluate(() => {
+      // Verifica growl de mensagens do PrimeFaces
+      const growl = document.querySelector('#growlGeral, .ui-growl-message, .ui-messages-error-summary');
+      if (growl && growl.innerText.trim() !== '') {
+        return { tipo: 'GROWL', texto: growl.innerText.trim() };
+      }
+
+      // Verifica diálogo de pendência cadastral (#j_idt101)
+      const dlgPendencia = document.querySelector('#j_idt101');
+      if (dlgPendencia && !dlgPendencia.classList.contains('ui-overlay-hidden')) {
+        return { tipo: 'PENDENCIA', texto: 'Encaminhe cópia de documento para atestado@pci.es.gov.br' };
+      }
+
+      // Verifica diálogo de dados inconsistentes (#j_idt115)
+      const dlgInconsistente = document.querySelector('#j_idt115');
+      if (dlgInconsistente && !dlgInconsistente.classList.contains('ui-overlay-hidden')) {
+        return { tipo: 'INCONSISTENTE', texto: 'Dados inconsistentes com o Instituto de Identificação do ES.' };
+      }
+
+      const corpo = document.body.innerText || '';
+      return { tipo: 'CORPO', texto: corpo };
     });
 
-    if (growlTexto) {
+    if (resultadoAnalise.tipo === 'PENDENCIA') {
+      return {
+        sucesso: true,
+        hasRecords: true,
+        riskLevel: 'HIGH',
+        statusTexto: 'PENDÊNCIA CADASTRAL / APONTAMENTO',
+        mensagem: resultadoAnalise.texto
+      };
+    }
+
+    if (resultadoAnalise.tipo === 'INCONSISTENTE') {
+      return {
+        sucesso: true,
+        hasRecords: false,
+        riskLevel: 'MEDIUM',
+        statusTexto: 'DADOS INCONSISTENTES',
+        mensagem: resultadoAnalise.texto
+      };
+    }
+
+    if (resultadoAnalise.tipo === 'GROWL' && resultadoAnalise.texto) {
       return {
         sucesso: false,
         hasRecords: false,
         statusTexto: 'ALERTA DO SISTEMA SESP',
-        mensagem: growlTexto.trim()
+        mensagem: resultadoAnalise.texto
       };
     }
 
-    if (corpoTexto.toUpperCase().includes('NADA CONSTA') || corpoTexto.toUpperCase().includes('CERTIDÃO NEGATIVA')) {
+    const textoTotal = resultadoAnalise.texto.toUpperCase();
+
+    if (textoTotal.includes('NADA CONSTA') || textoTotal.includes('CERTIDÃO NEGATIVA')) {
       return {
         sucesso: true,
         hasRecords: false,
         statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
         mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
-        rawSnippet: corpoTexto.slice(0, 300)
+        rawSnippet: resultadoAnalise.texto.slice(0, 300)
       };
     }
 
-    if (corpoTexto.toUpperCase().includes('EXISTEM REGISTROS') || corpoTexto.toUpperCase().includes('APONTAMENTO')) {
+    if (textoTotal.includes('EXISTEM REGISTROS') || textoTotal.includes('APONTAMENTO')) {
       return {
         sucesso: true,
         hasRecords: true,
@@ -179,13 +210,12 @@ export async function consultarAntecedentesPCES(dados) {
       };
     }
 
-    // Retorna um snippet do texto capturado para diagnóstico imediato se cair aqui novamente
     return {
       sucesso: false,
       hasRecords: false,
       statusTexto: 'RESPOSTA INDEFINIDA',
-      mensagem: 'A página respondeu, mas os termos de certidão não foram identificados.',
-      rawSnippet: corpoTexto.replace(/\s+/g, ' ').slice(0, 300)
+      mensagem: 'A automação disparou a consulta, mas o portal não retornou o atestado nem exibiu modais mapeados.',
+      rawSnippet: resultadoAnalise.texto.replace(/\s+/g, ' ').slice(0, 300)
     };
 
   } catch (error) {
