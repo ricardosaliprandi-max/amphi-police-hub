@@ -1,7 +1,6 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCPB(dados) {
-  // Nota: Se a URL oficial sofrer alteração de subdomínio/portal pelo estado, mantenha atualizada aqui
   const URL_ALVO = 'https://antecedentes.ssp.pb.gov.br/';
 
   const browser = await puppeteer.launch({
@@ -35,15 +34,12 @@ export async function consultarAntecedentesPCPB(dados) {
 
     console.log(`[PCPB] Acessando portal da PCPB (Vsoft iDSPS) para: ${dados.nome}`);
     
-    // Tentativa de acesso com tratamento de DNS/Timeout para não crashar o hub caso o portal esteja fora do ar
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(err => {
       throw new Error(`Portal da Paraíba inacessível ou fora do ar (DNS/Timeout): ${err.message}`);
     });
 
-    // Aguarda o formulário carregar de forma genérica
     await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
 
-    // Função auxiliar segura para preencher inputs
     async function preencherCampo(seletorPadrao, seletoresAlternativos, valor) {
       if (!valor) return;
       const todos = [seletorPadrao, ...seletoresAlternativos];
@@ -93,7 +89,7 @@ export async function consultarAntecedentesPCPB(dados) {
       await preencherCampo('input[name="pai"]', ['input[id*="pai" i]', 'input[name*="filiacao2" i]'], dados.nomePai.toUpperCase().trim());
     }
 
-    // 6. Submissão segura (Clicar no botão "Emitir")
+    // 6. Submissão segura
     console.log('[PCPB] Clicando no botão Emitir...');
     const botaoClicado = await page.evaluate(() => {
       const btn = document.querySelector('button#btEmitir, button[type="submit"], input[type="submit"]');
