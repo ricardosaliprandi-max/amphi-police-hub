@@ -9,6 +9,10 @@ export async function consultarAntecedentesPCMS(dados) {
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu'
     ]
   });
@@ -17,8 +21,19 @@ export async function consultarAntecedentesPCMS(dados) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    await page.setRequestInterception(true);
+    page.on('request', (req) => {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
+
     console.log(`[PCMS] Acessando portal SEJUSP-MS para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 35000 });
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
     // Aguarda o formulário ASP.NET renderizar
     await page.waitForSelector('input', { timeout: 15000 });
@@ -73,7 +88,7 @@ export async function consultarAntecedentesPCMS(dados) {
     if (btnGerar) {
       await Promise.all([
         btnGerar.click(),
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => null)
+        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null)
       ]);
     } else {
       await page.keyboard.press('Enter');
@@ -111,7 +126,13 @@ export async function consultarAntecedentesPCMS(dados) {
       rawSnippet: resultadoTexto.slice(0, 300)
     };
 
+  } catch (error) {
+    console.error(`[PCMS] Erro crítico na execução:`, error.message);
+    throw error;
   } finally {
-    await browser.close();
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCMS] Navegador encerrado com sucesso.`);
+    }
   }
 }
