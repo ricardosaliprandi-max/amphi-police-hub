@@ -26,7 +26,6 @@ app.get('/', (req, res) => {
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
     const rawBody = req.body || {};
-    // Extração flexível: aceita tanto direto na raiz quanto dentro de req.body.dados
     const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
 
     if (!dados.nome) {
@@ -46,7 +45,7 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. ROTA EM LOTE / SEQUENCIAL (Otimizada para poupar RAM no Render)
+// 2. ROTA EM LOTE SELETIVA (Otimizada para varrer apenas os estados marcados pelo operador)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
   const rawBody = req.body || {};
   const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
@@ -59,28 +58,51 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
     });
   }
 
-  console.log('[HUB] Iniciando varredura sequencial para TODAS as UFs para:', dados.nome);
+  // Mapeamento geral de todos os scrapers ativos
+  const scrapersMap = [
+    { uf: 'es', fn: consultarAntecedentesPCES },
+    { uf: 'ac', fn: consultarAntecedentesPCAC },
+    { uf: 'al', fn: consultarAntecedentesPCAL },
+    { uf: 'ce', fn: consultarAntecedentesPCCE },
+    { uf: 'ma', fn: consultarAntecedentesPCMA },
+    { uf: 'ms', fn: consultarAntecedentesPCMS },
+    { uf: 'pa', fn: consultarAntecedentesPCPA },
+    { uf: 'pb', fn: consultarAntecedentesPCPB },
+    { uf: 'pe', fn: consultarAntecedentesPCPE },
+    { uf: 'rn', fn: consultarAntecedentesPCRN },
+    { uf: 'rr', fn: consultarAntecedentesPCRR },
+    { uf: 'sc', fn: consultarAntecedentesPCSC }
+  ];
+
+  // Mapeamento geral de barreiras institucionais
+  const institucionalMap = [
+    { uf: 'go', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige resolução de Captcha e fluxo multi-fases.' },
+    { uf: 'mg', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige validação por Captcha visual interno.' },
+    { uf: 'df', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige confirmação de código OTP enviado por e-mail.' },
+    { uf: 'ap', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Fluxo restrito ao atendimento presencial.' },
+    { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
+  ];
+
+  // Se o operador enviou um array de estados (ex: dados.estados = ['es', 'ce', 'mg']), filtramos apenas eles.
+  // Caso contrário, executa todos os estados disponíveis por padrão.
+  const estadosFiltrados = rawBody.estados || dados.estados;
+  
+  let alvosScrapers = scrapersMap;
+  let alvosInstitucionais = institucionalMap;
+
+  if (Array.isArray(estadosFiltrados) && estadosFiltrados.length > 0) {
+    const ufsDesejadas = estadosFiltrados.map(u => String(u).toLowerCase().trim());
+    alvosScrapers = scrapersMap.filter(s => ufsDesejadas.includes(s.uf));
+    alvosInstitucionais = institucionalMap.filter(i => ufsDesejadas.includes(i.uf));
+  }
+
+  console.log(`[HUB] Iniciando varredura seletiva para UFs [${[...alvosScrapers.map(s => s.uf), ...alvosInstitucionais.map(i => i.uf)].join(', ').toUpperCase()}] para: ${dados.nome}`);
 
   try {
-    const scrapersMap = [
-      { uf: 'es', fn: consultarAntecedentesPCES },
-      { uf: 'ac', fn: consultarAntecedentesPCAC },
-      { uf: 'al', fn: consultarAntecedentesPCAL },
-      { uf: 'ce', fn: consultarAntecedentesPCCE },
-      { uf: 'ma', fn: consultarAntecedentesPCMA },
-      { uf: 'ms', fn: consultarAntecedentesPCMS },
-      { uf: 'pa', fn: consultarAntecedentesPCPA },
-      { uf: 'pb', fn: consultarAntecedentesPCPB },
-      { uf: 'pe', fn: consultarAntecedentesPCPE },
-      { uf: 'rn', fn: consultarAntecedentesPCRN },
-      { uf: 'rr', fn: consultarAntecedentesPCRR },
-      { uf: 'sc', fn: consultarAntecedentesPCSC }
-    ];
-
     const resultadosUFs = [];
 
-    // Executa as consultas de forma estritamente sequencial com respiro de memória
-    for (const item of scrapersMap) {
+    // Executa as consultas automáticas de forma estritamente sequencial com respiro de memória
+    for (const item of alvosScrapers) {
       try {
         console.log(`[HUB] Consultando estado: ${item.uf.toUpperCase()}...`);
         const resultado = await item.fn(dados);
@@ -89,7 +111,6 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
         // Pausa de 1.5s entre estados para o Render respirar e consolidar a RAM
         await new Promise(r => setTimeout(r, 1500));
 
-        // Força a coleta de lixo do Node.js se ativada (--expose-gc)
         if (global.gc) {
           global.gc();
         }
@@ -105,16 +126,7 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
       }
     }
 
-    // Estados com barreiras técnicas tratados institucionalmente
-    const resultadosInstitucionais = [
-      { uf: 'go', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige resolução de Captcha e fluxo multi-fases.' },
-      { uf: 'mg', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige validação por Captcha visual interno.' },
-      { uf: 'df', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige confirmação de código OTP enviado por e-mail.' },
-      { uf: 'ap', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Fluxo restrito ao atendimento presencial.' },
-      { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
-    ];
-
-    const todasUFs = [...resultadosUFs, ...resultadosInstitucionais];
+    const todasUFs = [...resultadosUFs, ...alvosInstitucionais];
     const geral_nada_consta = todasUFs.every(r => (r.sucesso && !r.hasRecords) || r.canalInstitucional);
 
     return res.json({
