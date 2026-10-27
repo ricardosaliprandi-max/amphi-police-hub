@@ -40,29 +40,46 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. NOVA ROTA: Consulta em Lote / Paralela (Dispara TODAS as UFs de uma vez)
+// 2. NOVA ROTA: Consulta em Lote / Sequencial (Evita estouro de memória no Render executando um por um)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
   const dados = req.body;
-  console.log('[HUB] Iniciando varredura em lote para TODAS as UFs para:', dados.nome);
+  console.log('[HUB] Iniciando varredura sequencial para TODAS as UFs para:', dados.nome);
 
   try {
-    // Dispara todos os scrapers mapeados em paralelo de forma blindada
-    const promessas = [
-      consultarAntecedentesPCES(dados).then(r => ({ uf: 'es', ...r })).catch(e => ({ uf: 'es', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCAC(dados).then(r => ({ uf: 'ac', ...r })).catch(e => ({ uf: 'ac', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCAL(dados).then(r => ({ uf: 'al', ...r })).catch(e => ({ uf: 'al', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCCE(dados).then(r => ({ uf: 'ce', ...r })).catch(e => ({ uf: 'ce', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCMA(dados).then(r => ({ uf: 'ma', ...r })).catch(e => ({ uf: 'ma', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCMS(dados).then(r => ({ uf: 'ms', ...r })).catch(e => ({ uf: 'ms', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCPA(dados).then(r => ({ uf: 'pa', ...r })).catch(e => ({ uf: 'pa', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCPB(dados).then(r => ({ uf: 'pb', ...r })).catch(e => ({ uf: 'pb', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCPE(dados).then(r => ({ uf: 'pe', ...r })).catch(e => ({ uf: 'pe', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCRN(dados).then(r => ({ uf: 'rn', ...r })).catch(e => ({ uf: 'rn', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCRR(dados).then(r => ({ uf: 'rr', ...r })).catch(e => ({ uf: 'rr', sucesso: false, mensagem: e.message })),
-      consultarAntecedentesPCSC(dados).then(r => ({ uf: 'sc', ...r })).catch(e => ({ uf: 'sc', sucesso: false, mensagem: e.message }))
+    const scrapersMap = [
+      { uf: 'es', fn: consultarAntecedentesPCES },
+      { uf: 'ac', fn: consultarAntecedentesPCAC },
+      { uf: 'al', fn: consultarAntecedentesPCAL },
+      { uf: 'ce', fn: consultarAntecedentesPCCE },
+      { uf: 'ma', fn: consultarAntecedentesPCMA },
+      { uf: 'ms', fn: consultarAntecedentesPCMS },
+      { uf: 'pa', fn: consultarAntecedentesPCPA },
+      { uf: 'pb', fn: consultarAntecedentesPCPB },
+      { uf: 'pe', fn: consultarAntecedentesPCPE },
+      { uf: 'rn', fn: consultarAntecedentesPCRN },
+      { uf: 'rr', fn: consultarAntecedentesPCRR },
+      { uf: 'sc', fn: consultarAntecedentesPCSC }
     ];
 
-    const resultadosAutomaticos = await Promise.all(promessas);
+    const resultadosUFs = [];
+
+    // Executa as consultas de forma sequencial para preservar a memória RAM do servidor
+    for (const item of scrapersMap) {
+      try {
+        console.log(`[HUB] Consultando estado: ${item.uf.toUpperCase()}...`);
+        const resultado = await item.fn(dados);
+        resultadosUFs.push({ uf: item.uf, ...resultado });
+      } catch (error) {
+        console.error(`[HUB] Erro na UF ${item.uf.toUpperCase()}:`, error.message);
+        resultadosUFs.push({
+          uf: item.uf,
+          sucesso: false,
+          hasRecords: false,
+          statusTexto: 'FALHA NA EXECUÇÃO',
+          mensagem: error.message
+        });
+      }
+    }
 
     // Estados com barreiras técnicas tratados institucionalmente
     const resultadosInstitucionais = [
@@ -73,17 +90,17 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
       { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
     ];
 
-    const resultadosUFs = [...resultadosAutomaticos, ...resultadosInstitucionais];
-    const geral_nada_consta = resultadosUFs.every(r => (r.sucesso && !r.hasRecords) || r.canalInstitucional);
+    const todasUFs = [...resultadosUFs, ...resultadosInstitucionais];
+    const geral_nada_consta = todasUFs.every(r => (r.sucesso && !r.hasRecords) || r.canalInstitucional);
 
     return res.json({
       sucesso: true,
       geral_nada_consta,
-      resultadosUFs
+      resultadosUFs: todasUFs
     });
 
   } catch (error) {
-    console.error('[HUB] Erro na varredura em lote geral:', error);
+    console.error('[HUB] Erro crítico na varredura geral:', error);
     return res.status(500).json({
       sucesso: false,
       mensagem: error.message
