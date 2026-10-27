@@ -5,7 +5,6 @@ export async function consultarAntecedentesPCES(dados) {
   
   let browser = null;
   let page = null;
-  let novaAba = null;
 
   try {
     browser = await puppeteer.launch({
@@ -17,6 +16,7 @@ export async function consultarAntecedentesPCES(dados) {
         '--disable-accelerated-2d-canvas',
         '--no-first-run',
         '--no-zygote',
+        '--single-process',
         '--disable-gpu',
         '--disable-infobars',
         '--window-size=1280,800',
@@ -40,10 +40,11 @@ export async function consultarAntecedentesPCES(dados) {
 
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Permitir scripts e XHR do PrimeFaces, abortando apenas recursos pesados desnecessários
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
+      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
         req.abort();
       } else {
         req.continue();
@@ -51,9 +52,9 @@ export async function consultarAntecedentesPCES(dados) {
     });
     
     const nomeBusca = dados?.nome || 'Cidadão';
-    console.log(`[PCES] Acessando portal oficial com camuflagem anti-bot para: ${nomeBusca}`);
+    console.log(`[PCES] Acessando portal oficial para: ${nomeBusca}`);
     
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(err => {
+    await page.goto(URL_ALVO, { waitUntil: 'networkidle2', timeout: 40000 }).catch(err => {
       throw new Error(`Falha de conexão com o portal da SESP-ES: ${err.message}`);
     });
 
@@ -61,140 +62,113 @@ export async function consultarAntecedentesPCES(dados) {
       throw new Error('O formulário principal (#formMaster) não foi renderizado pelo portal.');
     });
 
-    let tipoDocValue = "1";
+    // 1. Seleção robusta do Tipo de Documento no PrimeFaces
+    let tipoDocValue = "1"; // 1 = RG por padrão
     const docTipoDesejado = (dados?.tipoDocumento || 'RG').toUpperCase();
     if (docTipoDesejado.includes('CNH')) tipoDocValue = "7";
     if (docTipoDesejado.includes('CIN')) tipoDocValue = "12";
 
     await page.evaluate((val) => {
-      const select = document.querySelector('#j_idt57_input');
+      const select = document.querySelector('select[id$="input"]') || document.querySelector('#j_idt57_input');
       if (select) {
         select.value = val;
         select.dispatchEvent(new Event('change', { bubbles: true }));
-        if (typeof widget_j_idt57 !== 'undefined' && widget_j_idt57.selectValue) {
-          widget_j_idt57.selectValue(val);
+        // Tenta acionar disparadores jQuery / PrimeFaces se disponíveis
+        if (window.jQuery) {
+          window.jQuery(select).trigger('change');
         }
       }
     }, tipoDocValue);
 
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 600));
 
+    // 2. Preenchimento do Número do Documento
     const docLimpo = String(dados?.rg || dados?.numero || '').replace(/\D/g, '');
     if (docLimpo) {
-      await page.waitForSelector('#numero', { timeout: 5000 }).catch(() => {});
-      await page.evaluate((val) => {
-        const el = document.querySelector('#numero');
-        if (el) {
-          el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }, docLimpo);
+      await page.type('#numero', docLimpo, { delay: 30 }).catch(async () => {
+        await page.evaluate((val) => {
+          const el = document.getElementById('numero');
+          if (el) { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }
+        }, docLimpo);
+      });
     }
 
+    // 3. Nome Completo
     if (dados?.nome) {
-      await page.waitForSelector('#nomeIndividuo', { timeout: 5000 }).catch(() => {});
-      await page.evaluate((val) => {
-        const el = document.querySelector('#nomeIndividuo');
-        if (el) {
-          el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }, dados.nome.toUpperCase().trim());
+      await page.type('#nomeIndividuo', dados.nome.toUpperCase().trim(), { delay: 20 }).catch(async () => {
+        await page.evaluate((val) => {
+          const el = document.getElementById('nomeIndividuo');
+          if (el) { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }
+        }, dados.nome.toUpperCase().trim());
+      });
     }
 
-    if (dados?.nomePai && dados.nomePai.trim() !== '' && !dados.nomePai.toUpperCase().includes('NÃO DECLARADO') && !dados.nomePai.toUpperCase().includes('NAO DECLARADO')) {
-      await page.waitForSelector('#nomePai', { timeout: 5000 }).catch(() => {});
-      await page.evaluate((val) => {
-        const el = document.querySelector('#nomePai');
-        if (el) {
-          el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }, dados.nomePai.toUpperCase().trim());
+    // 4. Nome do Pai (se válido)
+    if (dados?.nomePai && dados.nomePai.trim() !== '' && !dados.nomePai.toUpperCase().includes('NÃODEC')) {
+      const nomePaiLimpo = dados.nomePai.toUpperCase().trim();
+      await page.type('#nomePai', nomePaiLimpo, { delay: 20 }).catch(async () => {
+        await page.evaluate((val) => {
+          const el = document.getElementById('nomePai');
+          if (el) { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }
+        }, nomePaiLimpo);
+      });
     }
 
+    // 5. Nome da Mãe
     if (dados?.nomeMae && dados.nomeMae.trim() !== '') {
-      await page.waitForSelector('#nomeMae', { timeout: 5000 }).catch(() => {});
-      await page.evaluate((val) => {
-        const el = document.querySelector('#nomeMae');
-        if (el) {
-          el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }, dados.nomeMae.toUpperCase().trim());
+      const nomeMaeLimpo = dados.nomeMae.toUpperCase().trim();
+      await page.type('#nomeMae', nomeMaeLimpo, { delay: 20 }).catch(async () => {
+        await page.evaluate((val) => {
+          const el = document.getElementById('nomeMae');
+          if (el) { el.value = val; el.dispatchEvent(new Event('input', { bubbles: true })); }
+        }, nomeMaeLimpo);
+      });
     }
 
+    // 6. Data de Nascimento (Formato DD/MM/YYYY)
     let dataFormatada = dados?.dataNascimento || '';
     if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
     if (dataFormatada) {
-      await page.waitForSelector('#dtNascimento_input', { timeout: 5000 }).catch(() => {});
       await page.evaluate((val) => {
-        const el = document.querySelector('#dtNascimento_input');
-        if (el) {
-          el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
+        const input = document.getElementById('dtNascimento_input');
+        if (input) {
+          input.value = val;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          if (window.jQuery) {
+            window.jQuery(input).val(val).trigger('change');
+          }
         }
       }, dataFormatada);
     }
 
-    const targetPromise = new Promise(resolve => {
-      browser.once('targetcreated', async target => {
-        try {
-          const p = await target.page();
-          resolve(p);
-        } catch (e) {
-          resolve(null);
-        }
-      });
-      setTimeout(() => resolve(null), 8000);
-    });
+    await new Promise(r => setTimeout(r, 800));
 
-    console.log('[PCES] Disparando botão Emitir Atestado...');
-    await page.click('#btnPesquisar').catch(async () => {
-      await page.evaluate(() => document.getElementById('btnPesquisar')?.click());
-    });
+    // 7. Disparar Pesquisa e Aguardar Requisição AJAX / Atualização do DOM
+    console.log('[PCES] Disparando botão Emitir Atestado (AJAX PrimeFaces)...');
+    
+    const [response] = await Promise.all([
+      page.waitForResponse(res => res.url().includes('pesquisaantecedentes') && res.status() === 200, { timeout: 15000 }).catch(() => null),
+      page.click('#btnPesquisar').catch(async () => {
+        await page.evaluate(() => document.getElementById('btnPesquisar')?.click());
+      })
+    ]);
 
-    novaAba = await targetPromise;
+    // Aguardar renderização completa pós-AJAX
+    await new Promise(r => setTimeout(r, 3000));
 
-    if (novaAba) {
-      try {
-        await novaAba.waitForLoadState ? novaAba.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {}) : new Promise(r => setTimeout(r, 2000));
-        const textoAba = await novaAba.evaluate(() => document.body.innerText || '');
-        if (textoAba.includes('NADA CONSTA') || textoAba.includes('ATESTADO DE ANTECEDENTES') || textoAba.includes('CERTIDÃO')) {
-          await novaAba.close().catch(() => {});
-          novaAba = null;
-          return {
-            sucesso: true,
-            hasRecords: false,
-            statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
-            mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
-            rawSnippet: textoAba.slice(0, 300)
-          };
-        }
-      } catch (e) {
-        // Fallback to main page evaluation
-      } finally {
-        if (novaAba) {
-          await novaAba.close().catch(() => {});
-          novaAba = null;
-        }
-      }
-    }
-
+    // 8. Analisar os resultados na página atual
     const resultadoAnalise = await page.evaluate(() => {
-      const growl = document.querySelector('#growlGeral, .ui-growl-message, .ui-messages-error-summary');
+      // Verificar mensagens de erro do sistema (Growl / Messages)
+      const growl = document.querySelector('#growlGeral, .ui-growl-message, .ui-messages-error-summary, .ui-message-error');
       if (growl && growl.innerText.trim() !== '') {
         return { tipo: 'GROWL', texto: growl.innerText.trim() };
       }
 
+      // Verificar modais de pendência cadastral ou divergência
       const dlgPendencia = document.querySelector('#j_idt101');
       if (dlgPendencia && !dlgPendencia.classList.contains('ui-overlay-hidden')) {
         return { tipo: 'PENDENCIA', texto: 'Encaminhe cópia de documento para atestado@pci.es.gov.br' };
@@ -255,11 +229,11 @@ export async function consultarAntecedentesPCES(dados) {
         hasRecords: false,
         statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
         mensagem: 'Nada Consta nos registros da Polícia Civil / Científica do ES.',
-        rawSnippet: resultadoAnalise.texto.slice(0, 300)
+        rawSnippet: resultadoAnalise.texto.replace(/\s+/g, ' ').slice(0, 300)
       };
     }
 
-    if (textoTotal.includes('EXISTEM REGISTROS') || textoTotal.includes('APONTAMENTO')) {
+    if (textoTotal.includes('EXISTEM REGISTROS') || textoTotal.includes('APONTAMENTO') || textoTotal.includes('CERTIDÃO POSITIVA')) {
       return {
         sucesso: true,
         hasRecords: true,
@@ -273,7 +247,7 @@ export async function consultarAntecedentesPCES(dados) {
       sucesso: false,
       hasRecords: false,
       statusTexto: 'RESPOSTA INDEFINIDA',
-      mensagem: 'A automação disparou a consulta, mas o portal não retornou o atestado nem exibiu modais mapeados.',
+      mensagem: 'A automação disparou a consulta, mas o portal retornou estado indefinido ou o formulário exigiu nova validação.',
       rawSnippet: resultadoAnalise.texto.replace(/\s+/g, ' ').slice(0, 300)
     };
 
@@ -286,9 +260,6 @@ export async function consultarAntecedentesPCES(dados) {
       mensagem: error?.message || 'Erro desconhecido'
     };
   } finally {
-    if (novaAba) {
-      await novaAba.close().catch(() => {});
-    }
     if (browser) {
       await browser.close().catch(() => {});
       console.log(`[PCES] Navegador encerrado com sucesso.`);
