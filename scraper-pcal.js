@@ -209,7 +209,7 @@ export async function consultarAntecedentesPCAL(dados) {
       statusTexto: 'FALHA NA EXECUÇÃO PCAL',
       mensagem: error.message
     };
-  } fnally {
+  } finally {
     if (browser) {
       await browser.close().catch(() => {});
       console.log(`[PCAL] Navegador encerrado com sucesso.`);
