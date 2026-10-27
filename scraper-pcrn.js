@@ -33,25 +33,60 @@ export async function consultarAntecedentesPCRN(dados) {
     });
 
     console.log(`[PCRN] Acessando portal SISCERT da PCRN para: ${dados.nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
+    
+    // Tratamento defensivo de DNS/Timeout para o portal do RN
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(err => {
+      throw new Error(`Portal do Rio Grande do Norte inacessível ou fora do ar (DNS/Timeout): ${err.message}`);
+    });
 
-    // Aguarda o formulário carregar
-    await page.waitForSelector('form.form', { timeout: 15000 });
+    // Aguarda o formulário carregar de forma flexível
+    await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
+
+    // Função auxiliar segura para preencher inputs
+    async function preencherCampo(seletorPadrao, seletoresAlternativos, valor) {
+      if (!valor) return;
+      const todos = [seletorPadrao, ...seletoresAlternativos];
+      for (const sel of todos) {
+        try {
+          const el = await page.$(sel);
+          if (el) {
+            await page.focus(sel);
+            await page.evaluate(s => document.querySelector(s).value = '', sel);
+            await page.type(sel, String(valor), { delay: 30 });
+            return true;
+          }
+        } catch (e) {
+          // Tenta o próximo
+        }
+      }
+      return false;
+    }
 
     // 1. Preenchimento do Nome Completo
-    await page.type('input[name="nomeCompleto"]', dados.nome.toUpperCase().trim(), { delay: 30 });
+    await preencherCampo('input[name="nomeCompleto"]', ['input[id*="nome" i]', 'input[name*="nome" i]'], dados.nome.toUpperCase().trim());
 
-    // 2. Preenchimento do CPF (apenas números, exatamente 11 dígitos)
+    // 2. Preenchimento do CPF
     const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '').slice(0, 11);
-    await page.type('input[name="cpf"]', cpfLimpo, { delay: 30 });
+    await preencherCampo('input[name="cpf"]', ['input[id*="cpf" i]', 'input[name*="cpf" i]'], cpfLimpo);
 
-    // 3. Submissão (Gerar Declaração)
+    // 3. Submissão segura (Gerar Declaração)
     console.log('[PCRN] Submetendo dados para geração da certidão...');
     
-    const [response] = await Promise.all([
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => null),
-      page.click('button#btnDeclaracao')
-    ]);
+    const botaoClicado = await page.evaluate(() => {
+      const btn = document.querySelector('button#btnDeclaracao, button[type="submit"], input[type="submit"]');
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
+
+    if (!botaoClicado) {
+      await page.keyboard.press('Enter');
+    }
+
+    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
+    await new Promise(r => setTimeout(r, 3000));
 
     // Analisa a página resultante
     const urlAtual = page.url();
@@ -86,8 +121,13 @@ export async function consultarAntecedentesPCRN(dados) {
     };
 
   } catch (error) {
-    console.error(`[PCRN] Erro crítico na execução:`, error.message);
-    throw error;
+    console.error(`[PCRN] Erro na execução:`, error.message);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCRN',
+      mensagem: error.message
+    };
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
