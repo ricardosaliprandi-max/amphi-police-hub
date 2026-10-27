@@ -101,4 +101,155 @@ export async function consultarAntecedentesPCES(payload) {
       if (select) {
         select.value = val;
         select.dispatchEvent(new Event('change', { bubbles: true }));
-        if (window
+        if (window.jQuery) window.jQuery(select).trigger('change');
+      }
+    }, valorTipoDoc);
+
+    await new Promise(r => setTimeout(r, 600));
+
+    // Preenchimento dos campos do formulário
+    await page.type('#numero', numeroDoc, { delay: 25 });
+    await page.type('#nomeIndividuo', nome, { delay: 20 });
+
+    if (nomePai) {
+      await page.type('#nomePai', nomePai, { delay: 20 });
+    }
+    if (nomeMae) {
+      await page.type('#nomeMae', nomeMae, { delay: 20 });
+    }
+
+    // Injeção da data no componente PrimeFaces Calendar com disparo de eventos
+    if (dataNasc) {
+      await page.evaluate((val) => {
+        const input = document.getElementById('dtNascimento_input');
+        if (input) {
+          input.value = val;
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          input.dispatchEvent(new Event('change', { bubbles: true }));
+          input.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+      }, dataNasc);
+    }
+
+    // Monitoramento simultâneo de nova aba aberta pelo Puppeteer
+    const novaAbaPromise = new Promise(resolve => {
+      const listener = target => {
+        if (target.type() === 'page' || target.url().includes('exibiratestado')) {
+          browser.off('targetcreated', listener);
+          resolve(target);
+        }
+      };
+      browser.on('targetcreated', listener);
+      setTimeout(() => {
+        browser.off('targetcreated', listener);
+        resolve(null);
+      }, 10000);
+    });
+
+    // Submissão do formulário via clique AJAX no botão #btnPesquisar (SEM waitForNavigation)
+    console.log('[PCES] Submetendo pesquisa via AJAX (#btnPesquisar)...');
+    await page.click('#btnPesquisar');
+
+    // Aguarda o término da chamada AJAX: espera o modal de loading (wDlgStatusDialog / #j_idt127) sumir ou surgir uma ação
+    await page.waitForFunction(() => {
+      const statusDialog = document.getElementById('j_idt127');
+      const dialogFechado = !statusDialog || statusDialog.classList.contains('ui-overlay-hidden');
+      const popupAcionado = Boolean(window.__certidaoAbertaUrl);
+      
+      const dlgPendencia = document.getElementById('j_idt101');
+      const pendenciaAberta = dlgPendencia && !dlgPendencia.classList.contains('ui-overlay-hidden');
+
+      const dlgInconsistente = document.getElementById('j_idt115');
+      const inconsistenteAberto = dlgInconsistente && !dlgInconsistente.classList.contains('ui-overlay-hidden');
+
+      return dialogFechado && (popupAcionado || pendenciaAberta || inconsistenteAberto);
+    }, { timeout: 15000 }).catch(() => {});
+
+    // 1. CHECAGEM DE SUCESSO: A nova guia de atestado foi aberta?
+    const targetAba = await novaAbaPromise;
+    const urlAbaAberta = await page.evaluate(() => window.__certidaoAbertaUrl);
+
+    if (targetAba || urlAbaAberta) {
+      console.log('[PCES] Certidão gerada em nova guia com sucesso!');
+      return {
+        sucesso: true,
+        hasRecords: false,
+        statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
+        mensagem: 'Certidão de antecedentes criminais emitida com sucesso pela PCES.',
+        rawSnippet: urlAbaAberta || targetAba?.url() || 'exibiratestado.jsf'
+      };
+    }
+
+    // 2. CHECAGEM DE MODAIS / ERROS: Se não abriu guia, o que a página renderizou?
+    const diagnosticoDOM = await page.evaluate(() => {
+      const dlgPendencia = document.getElementById('j_idt101');
+      const pendenciaVisivel = dlgPendencia && !dlgPendencia.classList.contains('ui-overlay-hidden');
+
+      const dlgInconsistente = document.getElementById('j_idt115');
+      const inconsistenteVisivel = dlgInconsistente && !dlgInconsistente.classList.contains('ui-overlay-hidden');
+
+      const growl = document.querySelector('#growlGeral, .ui-growl-message');
+      const growlTexto = growl ? growl.innerText.trim() : '';
+
+      return {
+        pendenciaVisivel,
+        inconsistenteVisivel,
+        growlTexto,
+        bodyTexto: document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 400)
+      };
+    });
+
+    if (diagnosticoDOM.inconsistenteVisivel) {
+      return {
+        sucesso: true,
+        hasRecords: false,
+        statusTexto: 'DADOS INCONSISTENTES',
+        mensagem: 'Dados inconsistentes com o Instituto de Identificação do ES. Envie cópia para instituto.identificacao@pci.es.gov.br.',
+        rawSnippet: diagnosticoDOM.bodyTexto
+      };
+    }
+
+    if (diagnosticoDOM.pendenciaVisivel) {
+      return {
+        sucesso: true,
+        hasRecords: true,
+        riskLevel: 'HIGH',
+        statusTexto: 'PENDÊNCIA CADASTRAL / APONTAMENTO',
+        mensagem: 'Encaminhe cópia de documento de identificação para atestado@pci.es.gov.br.',
+        rawSnippet: diagnosticoDOM.bodyTexto
+      };
+    }
+
+    if (diagnosticoDOM.growlTexto) {
+      return {
+        sucesso: false,
+        hasRecords: false,
+        statusTexto: 'ALERTA DO SISTEMA SESP',
+        mensagem: diagnosticoDOM.growlTexto,
+        rawSnippet: diagnosticoDOM.bodyTexto
+      };
+    }
+
+    return {
+      sucesso: true,
+      hasRecords: false,
+      statusTexto: 'SOLICITAÇÃO PROCESSADA',
+      mensagem: 'A solicitação foi enviada, mas o portal não abriu nova guia nem exibiu modais cadastrais.',
+      rawSnippet: diagnosticoDOM.bodyTexto
+    };
+
+  } catch (error) {
+    console.error(`[PCES] Erro crítico na execução:`, error?.message || error);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA EXECUÇÃO PCES',
+      mensagem: error?.message || 'Erro desconhecido'
+    };
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCES] Instância do navegador encerrada.`);
+    }
+  }
+}
