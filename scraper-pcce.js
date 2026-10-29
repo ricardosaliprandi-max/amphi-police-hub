@@ -4,7 +4,7 @@ export async function consultarAntecedentesPCCE(payload) {
   const URL_ALVO = 'https://sistemas.sspds.ce.gov.br/AtestadoAntecedentes/index.do?action=ShowAtestado';
   let browser = null;
 
-  // 1. Telemetria e Caixa-Preta Local
+  // 1. Telemetria e Auditoria Local
   const browserLogs = [];
   const execSteps = [];
 
@@ -21,13 +21,13 @@ export async function consultarAntecedentesPCCE(payload) {
   const nome = (dados.nome || '').toUpperCase().trim();
   const mae = (dados.nomeMae || dados.mae || '').toUpperCase().trim();
 
-  // Regra técnica estrita da PCCE: Remover dígito verificador do RG
+  // Regra técnica estrita da PCCE: Remover dígito verificador do RG[cite: 2]
   let rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
   if (rgLimpo.length > 1) {
     rgLimpo = rgLimpo.slice(0, -1);
   }
 
-  // Formatação de Data para DD/MM/AAAA
+  // Formatação de Data para DD/MM/AAAA[cite: 2]
   let dataNasc = dados.dataNascimento || dados.dtNascimento || '';
   if (/^\d{4}-\d{2}-\d{2}$/.test(dataNasc)) {
     const [ano, mes, dia] = dataNasc.split('-');
@@ -92,20 +92,28 @@ export async function consultarAntecedentesPCCE(payload) {
     logStep('navegando_portal_alvo', { url: URL_ALVO });
     await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
-    // Aguarda o formulário carregar no DOM
-    await page.waitForSelector('input[name="numRg"]', { timeout: 15000 });
+    // Aguarda o formulário carregar no DOM[cite: 2]
+    await page.waitForSelector('form[name="AtestadoForm"]', { timeout: 15000 });
     logStep('formulario_carregado');
 
-    // Preenchimento dos campos mapeados no HTML
+    // Preenchimento de RG e Nome[cite: 2]
     await page.focus('input[name="numRg"]');
     await page.type('input[name="numRg"]', rgLimpo, { delay: 25 });
 
     await page.focus('input[name="nome"]');
     await page.type('input[name="nome"]', nome, { delay: 20 });
 
+    // Preenchimento de Data de Nascimento blindado contra conflito da máscara txtBoxFormat[cite: 2]
     if (dataNasc) {
-      await page.focus('input[name="dataNasc"]');
-      await page.type('input[name="dataNasc"]', dataNasc, { delay: 25 });
+      await page.evaluate((val) => {
+        const inputData = document.querySelector('input[name="dataNasc"]');
+        if (inputData) {
+          inputData.value = val;
+          inputData.dispatchEvent(new Event('input', { bubbles: true }));
+          inputData.dispatchEvent(new Event('change', { bubbles: true }));
+          inputData.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
+      }, dataNasc);
     }
 
     if (mae) {
@@ -113,7 +121,7 @@ export async function consultarAntecedentesPCCE(payload) {
       await page.type('input[name="mae"]', mae, { delay: 20 });
     }
 
-    logStep('dados_biograficos_preenchidos', { rgLimpo, dataNasc });
+    logStep('dados_biograficos_preenchidos', { rgSemDv: rgLimpo, dataNasc });
 
     // Monitoramento de abertura de nova guia caso ocorra redirecionamento
     const novaGuiaPromise = new Promise(resolve => {
@@ -130,19 +138,19 @@ export async function consultarAntecedentesPCCE(payload) {
       }, 10000);
     });
 
-    // Submissão do formulário Struts
+    // Submissão do formulário Struts acionando o botão e fallback direto no form[cite: 2]
     logStep('submetendo_formulario');
-    const submitBtn = await page.$('input[type="submit"][value="Pesquisar"], input[type="submit"]');
-
-    if (submitBtn) {
-      await Promise.all([
-        submitBtn.click(),
-        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
-      ]);
-    } else {
-      await page.keyboard.press('Enter');
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {});
-    }
+    await Promise.all([
+      page.evaluate(() => {
+        const btn = document.querySelector('input[type="submit"][value="Pesquisar"], input[type="submit"]');
+        if (btn) {
+          btn.click();
+        } else if (document.AtestadoForm) {
+          document.AtestadoForm.submit();
+        }
+      }),
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 25000 }).catch(() => {})
+    ]);
 
     logStep('navegacao_pos_submit_finalizada');
 
@@ -165,7 +173,7 @@ export async function consultarAntecedentesPCCE(payload) {
       };
     }
 
-    // 2. Extração e Diagnóstico do DOM retornado
+    // 2. Extração e Diagnóstico do DOM retornado[cite: 2]
     const diagnostico = await page.evaluate(() => {
       const errosEl = document.getElementById('errors');
       const errosTexto = errosEl ? errosEl.innerText.trim() : '';
@@ -181,7 +189,7 @@ export async function consultarAntecedentesPCCE(payload) {
 
     const textoAnalise = (diagnostico.errosTexto + ' ' + diagnostico.corpoTexto).toUpperCase();
 
-    // Restrição institucional de atendimento presencial
+    // Restrição institucional de atendimento presencial[cite: 2]
     if (
       textoAnalise.includes('NÃO FOI POSSÍVEL') || 
       textoAnalise.includes('DIRIGIR-SE') || 
@@ -201,7 +209,7 @@ export async function consultarAntecedentesPCCE(payload) {
       };
     }
 
-    // Apontamento criminal ou pendência processual
+    // Apontamento criminal ou pendência processual[cite: 1]
     if (textoAnalise.includes('EXISTEM REGISTROS') || textoAnalise.includes('APONTAMENTO') || textoAnalise.includes('PENDÊNCIA')) {
       return {
         sucesso: true,
@@ -217,7 +225,7 @@ export async function consultarAntecedentesPCCE(payload) {
       };
     }
 
-    // Sucesso direto na mesma página
+    // Sucesso direto na mesma página[cite: 1]
     if (textoAnalise.includes('NADA CONSTA') || textoAnalise.includes('ATESTADO DE ANTECEDENTES') || textoAnalise.includes('CERTIDÃO NEGATIVA')) {
       return {
         sucesso: true,
