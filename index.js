@@ -25,13 +25,23 @@ app.get('/', (req, res) => {
   return res.json({ status: 'online', service: 'amphi-police-hub' });
 });
 
-// 1. Rota Legada (Garante 100% de compatibilidade com a bancada AMPHI atual para o Espírito Santo)
+// 1. ROTA LEGADA BLINDADA (Compatibilidade com bancada PCES com bloqueio contra desvios)
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
     const rawBody = req.body || {};
     const dados = rawBody.dados && typeof rawBody.dados === 'object' 
       ? { ...rawBody.dados, ...rawBody } 
       : rawBody;
+
+    // Se a requisição contiver estados e nenhum deles for 'es', rejeita para não executar o scraper errado
+    const estados = rawBody.estados || dados.estados;
+    if (Array.isArray(estados) && estados.length > 0 && !estados.map(e => String(e).toLowerCase().trim()).includes('es')) {
+      return res.status(400).json({
+        sucesso: false,
+        statusTexto: 'ROTA INCOMPATÍVEL',
+        mensagem: `A rota '/api/pces/antecedentes' é exclusiva do Espírito Santo (ES). Você enviou estados: [${estados.join(', ')}]. Para consultar outros estados utilize '/api/v1/:uf/antecedentes' ou '/api/v1/todos/antecedentes'.`
+      });
+    }
 
     if (!dados.nome) {
       return res.status(400).json({ 
@@ -40,7 +50,7 @@ app.post('/api/pces/antecedentes', async (req, res) => {
       });
     }
 
-    console.log('[HUB] Consulta PCES via rota direta:', dados.nome);
+    console.log('[HUB] Consulta PCES via rota direta legada:', dados.nome);
     const resultado = await consultarAntecedentesPCES(dados);
     return res.json(resultado);
 
@@ -55,7 +65,7 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. ROTA EM LOTE SELETIVA (Otimizada para varrer apenas os estados selecionados via checkbox pelo operador)
+// 2. ROTA EM LOTE SELETIVA (Executa estritamente as UFs selecionadas ou todas por padrão)
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
   const rawBody = req.body || {};
   const dados = rawBody.dados && typeof rawBody.dados === 'object' 
@@ -86,7 +96,7 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
     { uf: 'sc', fn: consultarAntecedentesPCSC }
   ];
 
-  // Mapeamento geral de barreiras institucionais (estados sem automação web direta)
+  // Mapeamento geral de barreiras institucionais
   const institucionalMap = [
     { uf: 'go', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige resolução de Captcha e fluxo multi-fases.' },
     { uf: 'mg', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige validação por Captcha visual interno.' },
@@ -95,7 +105,7 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
     { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
   ];
 
-  // Identifica os estados marcados pelo operador (via array de checkboxes na requisição)
+  // Identificação e normalização do array de estados
   const estadosFiltrados = rawBody.estados || dados.estados;
   let alvosScrapers = scrapersMap;
   let alvosInstitucionais = institucionalMap;
@@ -112,17 +122,17 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
   try {
     const resultadosUFs = [];
 
-    // Executa as consultas automáticas de forma estritamente sequencial com respiro de memória
+    // Execução sequencial com respiro de memória para Render (512MB RAM)
     for (const item of alvosScrapers) {
       try {
         console.log(`[HUB] Consultando estado: ${item.uf.toUpperCase()}...`);
         const resultado = await item.fn(dados);
         resultadosUFs.push({ uf: item.uf, ...resultado });
 
-        // Pausa estratégica de 1.5s entre estados para o Render consolidar a RAM
+        // Pausa de 1.5s entre estados para consolidar a RAM
         await new Promise(r => setTimeout(r, 1500));
         if (global.gc) {
-          global.gc();
+          try { global.gc(); } catch (e) {}
         }
       } catch (error) {
         console.error(`[HUB] Erro na UF ${item.uf.toUpperCase()}:`, error.message);
@@ -154,7 +164,7 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
   }
 });
 
-// 3. Rota Unificada Individual por Estado
+// 3. ROTA UNIFICADA INDIVIDUAL POR ESTADO
 app.post('/api/v1/:uf/antecedentes', async (req, res) => {
   const uf = req.params.uf.toLowerCase().trim();
   const rawBody = req.body || {};
@@ -237,6 +247,10 @@ app.post('/api/v1/:uf/antecedentes', async (req, res) => {
           statusTexto: 'ESTADO NÃO SUPORTADO',
           mensagem: `O orquestrador não possui scraper ativo para o estado '${uf.toUpperCase()}'.`
         });
+    }
+
+    if (global.gc) {
+      try { global.gc(); } catch (e) {}
     }
 
     return res.json(resultado);
