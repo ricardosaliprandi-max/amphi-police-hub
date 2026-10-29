@@ -20,40 +20,33 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Health check para manter o serviço acordado no Render
+// Health check para manter o Render acordado
 app.get('/', (req, res) => {
   return res.json({ status: 'online', service: 'amphi-police-hub' });
 });
 
-// 1. ROTA LEGADA BLINDADA (Compatibilidade com bancada PCES com bloqueio contra desvios)
+// 1. Rota Legada (Compatibilidade com PCES e trava de segurança)
 app.post('/api/pces/antecedentes', async (req, res) => {
   try {
     const rawBody = req.body || {};
-    const dados = rawBody.dados && typeof rawBody.dados === 'object' 
-      ? { ...rawBody.dados, ...rawBody } 
-      : rawBody;
+    const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
 
-    // Se a requisição contiver estados e nenhum deles for 'es', rejeita para não executar o scraper errado
     const estados = rawBody.estados || dados.estados;
     if (Array.isArray(estados) && estados.length > 0 && !estados.map(e => String(e).toLowerCase().trim()).includes('es')) {
       return res.status(400).json({
         sucesso: false,
         statusTexto: 'ROTA INCOMPATÍVEL',
-        mensagem: `A rota '/api/pces/antecedentes' é exclusiva do Espírito Santo (ES). Você enviou estados: [${estados.join(', ')}]. Para consultar outros estados utilize '/api/v1/:uf/antecedentes' ou '/api/v1/todos/antecedentes'.`
+        mensagem: `A rota '/api/pces/antecedentes' é exclusiva do ES. Utilize '/api/v1/todos/antecedentes' ou '/api/v1/:uf/antecedentes'.`
       });
     }
 
     if (!dados.nome) {
-      return res.status(400).json({ 
-        sucesso: false, 
-        mensagem: 'O campo "nome" é obrigatório no corpo JSON.' 
-      });
+      return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
     }
 
     console.log('[HUB] Consulta PCES via rota direta legada:', dados.nome);
     const resultado = await consultarAntecedentesPCES(dados);
     return res.json(resultado);
-
   } catch (error) {
     console.error('[HUB] Erro na consulta PCES:', error);
     return res.status(500).json({
@@ -65,71 +58,64 @@ app.post('/api/pces/antecedentes', async (req, res) => {
   }
 });
 
-// 2. ROTA EM LOTE SELETIVA (Executa estritamente as UFs selecionadas ou todas por padrão)
+// 2. ROTA EM LOTE SELETIVA
 app.post('/api/v1/todos/antecedentes', async (req, res) => {
-  const rawBody = req.body || {};
-  const dados = rawBody.dados && typeof rawBody.dados === 'object' 
-    ? { ...rawBody.dados, ...rawBody } 
-    : rawBody;
-
-  if (!dados.nome) {
-    return res.status(400).json({
-      sucesso: false,
-      statusTexto: 'REQUISIÇÃO INVÁLIDA',
-      mensagem: 'O corpo da requisição (JSON) está vazio ou não contém o campo "nome". Verifique se o Header "Content-Type: application/json" está configurado.'
-    });
-  }
-
-  // Mapeamento geral de todos os scrapers automáticos ativos
-  const scrapersMap = [
-    { uf: 'es', fn: consultarAntecedentesPCES },
-    { uf: 'ac', fn: consultarAntecedentesPCAC },
-    { uf: 'al', fn: consultarAntecedentesPCAL },
-    { uf: 'ce', fn: consultarAntecedentesPCCE },
-    { uf: 'ma', fn: consultarAntecedentesPCMA },
-    { uf: 'ms', fn: consultarAntecedentesPCMS },
-    { uf: 'pa', fn: consultarAntecedentesPCPA },
-    { uf: 'pb', fn: consultarAntecedentesPCPB },
-    { uf: 'pe', fn: consultarAntecedentesPCPE },
-    { uf: 'rn', fn: consultarAntecedentesPCRN },
-    { uf: 'rr', fn: consultarAntecedentesPCRR },
-    { uf: 'sc', fn: consultarAntecedentesPCSC }
-  ];
-
-  // Mapeamento geral de barreiras institucionais
-  const institucionalMap = [
-    { uf: 'go', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige resolução de Captcha e fluxo multi-fases.' },
-    { uf: 'mg', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige validação por Captcha visual interno.' },
-    { uf: 'df', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige confirmação de código OTP enviado por e-mail.' },
-    { uf: 'ap', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Fluxo restrito ao atendimento presencial.' },
-    { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
-  ];
-
-  // Identificação e normalização do array de estados
-  const estadosFiltrados = rawBody.estados || dados.estados;
-  let alvosScrapers = scrapersMap;
-  let alvosInstitucionais = institucionalMap;
-
-  if (Array.isArray(estadosFiltrados) && estadosFiltrados.length > 0) {
-    const ufsDesejadas = estadosFiltrados.map(u => String(u).toLowerCase().trim());
-    alvosScrapers = scrapersMap.filter(s => ufsDesejadas.includes(s.uf));
-    alvosInstitucionais = institucionalMap.filter(i => ufsDesejadas.includes(i.uf));
-  }
-
-  const UFsAtivas = [...alvosScrapers.map(s => s.uf), ...alvosInstitucionais.map(i => i.uf)];
-  console.log(`[HUB] Iniciando varredura seletiva para UFs [${UFsAtivas.join(', ').toUpperCase()}] para: ${dados.nome}`);
-
   try {
+    const rawBody = req.body || {};
+    const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
+
+    if (!dados.nome) {
+      return res.status(400).json({
+        sucesso: false,
+        statusTexto: 'REQUISIÇÃO INVÁLIDA',
+        mensagem: 'O campo "nome" é obrigatório no corpo JSON.'
+      });
+    }
+
+    const scrapersMap = [
+      { uf: 'es', fn: consultarAntecedentesPCES },
+      { uf: 'ac', fn: consultarAntecedentesPCAC },
+      { uf: 'al', fn: consultarAntecedentesPCAL },
+      { uf: 'ce', fn: consultarAntecedentesPCCE },
+      { uf: 'ma', fn: consultarAntecedentesPCMA },
+      { uf: 'ms', fn: consultarAntecedentesPCMS },
+      { uf: 'pa', fn: consultarAntecedentesPCPA },
+      { uf: 'pb', fn: consultarAntecedentesPCPB },
+      { uf: 'pe', fn: consultarAntecedentesPCPE },
+      { uf: 'rn', fn: consultarAntecedentesPCRN },
+      { uf: 'rr', fn: consultarAntecedentesPCRR },
+      { uf: 'sc', fn: consultarAntecedentesPCSC }
+    ];
+
+    const institucionalMap = [
+      { uf: 'go', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige resolução de Captcha e fluxo multi-fases.' },
+      { uf: 'mg', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige validação por Captcha visual interno.' },
+      { uf: 'df', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige confirmação de código OTP enviado por e-mail.' },
+      { uf: 'ap', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Fluxo restrito ao atendimento presencial.' },
+      { uf: 'am', sucesso: false, canalInstitucional: true, hasRecords: false, statusTexto: 'CANAL INSTITUCIONAL', mensagem: 'Exige fluxo próprio autenticado na base local.' }
+    ];
+
+    const estadosFiltrados = rawBody.estados || dados.estados;
+    let alvosScrapers = scrapersMap;
+    let alvosInstitucionais = institucionalMap;
+
+    if (Array.isArray(estadosFiltrados) && estadosFiltrados.length > 0) {
+      const ufsDesejadas = estadosFiltrados.map(u => String(u).toLowerCase().trim());
+      alvosScrapers = scrapersMap.filter(s => ufsDesejadas.includes(s.uf));
+      alvosInstitucionais = institucionalMap.filter(i => ufsDesejadas.includes(i.uf));
+    }
+
+    console.log(`[HUB] Executando UFs: [${[...alvosScrapers.map(s => s.uf), ...alvosInstitucionais.map(i => i.uf)].join(', ').toUpperCase()}]`);
+
     const resultadosUFs = [];
 
-    // Execução sequencial com respiro de memória para Render (512MB RAM)
+    // Execução sequencial estrita com respiro de memória para o Render (512MB RAM)
     for (const item of alvosScrapers) {
       try {
         console.log(`[HUB] Consultando estado: ${item.uf.toUpperCase()}...`);
         const resultado = await item.fn(dados);
         resultadosUFs.push({ uf: item.uf, ...resultado });
 
-        // Pausa de 1.5s entre estados para consolidar a RAM
         await new Promise(r => setTimeout(r, 1500));
         if (global.gc) {
           try { global.gc(); } catch (e) {}
@@ -154,7 +140,6 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
       geral_nada_consta,
       resultadosUFs: todasUFs
     });
-
   } catch (error) {
     console.error('[HUB] Erro crítico na varredura geral:', error);
     return res.status(500).json({
@@ -164,19 +149,14 @@ app.post('/api/v1/todos/antecedentes', async (req, res) => {
   }
 });
 
-// 3. ROTA UNIFICADA INDIVIDUAL POR ESTADO
+// 3. Rota Unificada Individual por Estado
 app.post('/api/v1/:uf/antecedentes', async (req, res) => {
   const uf = req.params.uf.toLowerCase().trim();
   const rawBody = req.body || {};
-  const dados = rawBody.dados && typeof rawBody.dados === 'object' 
-    ? { ...rawBody.dados, ...rawBody } 
-    : rawBody;
+  const dados = rawBody.dados && typeof rawBody.dados === 'object' ? { ...rawBody.dados, ...rawBody } : rawBody;
 
   if (!dados.nome) {
-    return res.status(400).json({ 
-      sucesso: false, 
-      mensagem: 'O campo "nome" é obrigatório no corpo JSON.' 
-    });
+    return res.status(400).json({ sucesso: false, mensagem: 'O campo "nome" é obrigatório no corpo JSON.' });
   }
 
   console.log(`[HUB] Requisição individual recebida para UF: ${uf.toUpperCase()}`);
@@ -254,7 +234,6 @@ app.post('/api/v1/:uf/antecedentes', async (req, res) => {
     }
 
     return res.json(resultado);
-
   } catch (error) {
     console.error(`[HUB] Erro na consulta [${uf.toUpperCase()}]:`, error);
     return res.status(500).json({
