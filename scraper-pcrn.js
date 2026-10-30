@@ -1,137 +1,103 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCRN(dados) {
-  const URL_ALVO = 'https://siscert.deic.rn.gov.br/';
-
+  const URL_ALVO = 'https://sinf2.policiacivil.rn.gov.br/siscert/Home/index';
+  
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
-      '--disable-gpu'
-    ]
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
   });
 
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
-    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    console.log(`[PCRN] Acessando portal SISCERT da PCRN para: ${dados.nome}`);
-    
-    // Tratamento defensivo de DNS/Timeout para o portal do RN
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(err => {
-      throw new Error(`Portal do Rio Grande do Norte inacessível ou fora do ar (DNS/Timeout): ${err.message}`);
-    });
-
-    // Aguarda o formulário carregar de forma flexível
-    await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
-
-    // Função auxiliar segura para preencher inputs
-    async function preencherCampo(seletorPadrao, seletoresAlternativos, valor) {
-      if (!valor) return;
-      const todos = [seletorPadrao, ...seletoresAlternativos];
-      for (const sel of todos) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            await page.focus(sel);
-            await page.evaluate(s => document.querySelector(s).value = '', sel);
-            await page.type(sel, String(valor), { delay: 30 });
-            return true;
-          }
-        } catch (e) {
-          // Tenta o próximo
+    // Interceptação rigorosa de TODAS as requisições de rede para auditoria
+    page.on('request', req => {
+      const url = req.url();
+      console.log(`[PCRN DEBUG REDE] Método: ${req.method()} | URL: ${url}`);
+      if (req.method() === 'POST' || req.method() === 'GET') {
+        const postData = req.postData();
+        if (postData) {
+          console.log(`[PCRN DEBUG PAYLOAD]:`, postData);
         }
       }
-      return false;
-    }
-
-    // 1. Preenchimento do Nome Completo
-    await preencherCampo('input[name="nomeCompleto"]', ['input[id*="nome" i]', 'input[name*="nome" i]'], dados.nome.toUpperCase().trim());
-
-    // 2. Preenchimento do CPF
-    const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '').slice(0, 11);
-    await preencherCampo('input[name="cpf"]', ['input[id*="cpf" i]', 'input[name*="cpf" i]'], cpfLimpo);
-
-    // 3. Submissão segura (Gerar Declaração)
-    console.log('[PCRN] Submetendo dados para geração da certidão...');
-    
-    const botaoClicado = await page.evaluate(() => {
-      const btn = document.querySelector('button#btnDeclaracao, button[type="submit"], input[type="submit"]');
-      if (btn) {
-        btn.click();
-        return true;
-      }
-      return false;
     });
 
-    if (!botaoClicado) {
-      await page.keyboard.press('Enter');
-    }
+    // Interceptação de respostas para inspecionar o retorno (ex: PDF ou JSON)
+    page.on('response', async res => {
+      const url = res.url();
+      const contentType = res.headers()['content-type'] || '';
+      if (url.includes('gerarDeclaracaoEmPDF') || contentType.includes('application/pdf') || contentType.includes('json')) {
+        console.log(`[PCRN DEBUG RESPOSTA] URL: ${url} | Content-Type: ${contentType} | Status: ${res.status()}`);
+      }
+    });
 
-    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
-    await new Promise(r => setTimeout(r, 3000));
+    console.log(`[PCRN DEBUG] Acessando portal do Rio Grande do Norte...`);
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 });
 
-    // Analisa a página resultante
-    const urlAtual = page.url();
-    const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
+    // Aguarda os inputs do formulário estarem presentes com base no HTML fornecido
+    await page.waitForSelector('#nomeCompleto', { timeout: 10000 });
+    await page.waitForSelector('#cpf', { timeout: 10000 });
 
-    if (urlAtual.includes('gerarDeclaracaoEmPDF') || resultadoTexto.toUpperCase().includes('DECLARAÇÃO') || resultadoTexto.toUpperCase().includes('CERTIDÃO')) {
-      return {
-        sucesso: true,
-        hasRecords: false,
-        statusTexto: 'CERTIDÃO / DECLARAÇÃO GERADA',
-        mensagem: 'Declaração de antecedentes criminais emitida com sucesso na base da PCRN.',
-        rawSnippet: resultadoTexto.slice(0, 300)
+    // Normalização dos dados de entrada
+    const rawCpf = dados.candidateCpf || dados.cpf || '';
+    const rawName = dados.candidateName || dados.nome || '';
+    const cpfLimpo = String(rawCpf).replace(/\D/g, '');
+
+    console.log(`[PCRN DEBUG] Preenchendo formulário para: ${rawName} (CPF: ${cpfLimpo})`);
+
+    // Preenche os campos do formulário disparando eventos nativos
+    await page.evaluate((payload) => {
+      const setVal = (sel, val) => {
+        const el = document.querySelector(sel);
+        if (el && val) {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }
       };
-    }
 
-    if (resultadoTexto.toUpperCase().includes('EXISTEM REGISTROS') || resultadoTexto.toUpperCase().includes('APONTAMENTO')) {
-      return {
-        sucesso: true,
-        hasRecords: true,
-        riskLevel: 'HIGH',
-        statusTexto: 'REGISTRO LOCALIZADO',
-        mensagem: 'Identificado registro de antecedentes criminais na base da PCRN.'
-      };
-    }
+      setVal('#nomeCompleto', payload.nome);
+      setVal('#cpf', payload.cpf);
+    }, {
+      nome: rawName.toUpperCase().trim(),
+      cpf: cpfLimpo
+    });
 
-    return {
-      sucesso: true,
-      hasRecords: false,
-      statusTexto: 'CONSULTA PROCESSADA',
-      mensagem: 'Solicitação submetida com sucesso no portal da PCRN.',
-      rawSnippet: resultadoTexto.slice(0, 300)
-    };
+    await new Promise(r => setTimeout(r, 1000));
 
-  } catch (error) {
-    console.error(`[PCRN] Erro na execução:`, error.message);
+    // Clica no botão #btnDeclaracao para submeter o formulário
+    console.log('[PCRN DEBUG] Clicando no botão #btnDeclaracao...');
+    
+    // Como a action do form é GET para /siscert/Home/gerarDeclaracaoEmPDF, podemos clicar ou monitorar a navegação
+    const [response] = await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => null),
+      page.click('#btnDeclaracao').catch(async () => {
+        await page.evaluate(() => document.getElementById('btnDeclaracao').click());
+      })
+    ]);
+
+    const urlFinal = page.url();
+    console.log(`[PCRN DEBUG] URL final após clique: ${urlFinal}`);
+
     return {
       sucesso: false,
       hasRecords: false,
-      statusTexto: 'FALHA NA EXECUÇÃO PCRN',
+      statusTexto: 'AUDITORIA PCRN CONCLUÍDA',
+      mensagem: `URL final capturada: ${urlFinal}`
+    };
+
+  } catch (error) {
+    console.error(`[PCRN DEBUG] Erro na auditoria:`, error);
+    return {
+      sucesso: false,
+      hasRecords: false,
+      statusTexto: 'FALHA NA AUDITORIA PCRN',
       mensagem: error.message
     };
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-      console.log(`[PCRN] Navegador encerrado com sucesso.`);
-    }
+    if (browser) await browser.close().catch(() => {});
   }
 }
