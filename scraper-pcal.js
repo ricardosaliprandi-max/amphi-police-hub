@@ -12,7 +12,7 @@ export async function consultarAntecedentesPCAL(dados) {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--single-process', // Essencial para gerir o limite estrito de 512MB de RAM no Render
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu',
       '--disable-infobars',
       '--window-size=1280,800',
@@ -104,7 +104,7 @@ export async function consultarAntecedentesPCAL(dados) {
       interceptedRequest.continue();
     });
 
-    // Preenchimento dos campos reais mapeados no HTML (#rg, #orgaoExpedidor, #nome, #dataNascimento, #cpf, #mae, #pai)
+    // Preenchimento dos campos reais mapeados no HTML
     await page.evaluate((payload) => {
       if (document.querySelector('#rg')) document.querySelector('#rg').value = payload.rg || '';
       if (document.querySelector('#orgaoExpedidor')) document.querySelector('#orgaoExpedidor').value = payload.orgaoExpedidor || 'SSP';
@@ -142,7 +142,7 @@ export async function consultarAntecedentesPCAL(dados) {
 
     console.log(`[PCAL] Endpoint real descoberto via rede: ${endpointRealDaApi}`);
 
-    // 4. Execução da chamada direta na API utilizando a rota validada e os tokens capturados
+    // 4. Execução da chamada direta na API com proteção defensiva contra Cold-Start (retorno de HTML)
     const resultadoBusca = await page.evaluate(async (payload, apiTokens, apiUrl) => {
       const bodyData = {
         Cpf: payload.cpfLimpo,
@@ -154,37 +154,56 @@ export async function consultarAntecedentesPCAL(dados) {
         NomePai: payload.fatherName
       };
 
-      try {
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest',
-            'RequestVerificationToken': apiTokens.requestVerificationToken,
-            'X-Internal-Key': apiTokens.internalKey
-          },
-          body: JSON.stringify(bodyData)
-        });
-
-        const textResponse = await response.text();
-        let jsonResponse;
+      let tentativasRestantes = 3;
+      while (tentativasRestantes > 0) {
         try {
-          jsonResponse = JSON.parse(textResponse);
-        } catch (e) {
-          jsonResponse = { rawText: textResponse };
-        }
+          const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest',
+              'RequestVerificationToken': apiTokens.requestVerificationToken,
+              'X-Internal-Key': apiTokens.internalKey
+            },
+            body: JSON.stringify(bodyData)
+          });
 
-        return {
-          status: response.status,
-          ok: response.ok,
-          data: jsonResponse
-        };
-      } catch (err) {
-        return {
-          status: 500,
-          ok: false,
-          error: err.message
-        };
+          const textResponse = await response.text();
+
+          // Trata páginas HTML de erro ou Cold-Start retornadas pelo servidor de AL
+          if (textResponse.trim().startsWith('<') || textResponse.includes('<!DOCTYPE html>') || textResponse.includes('Service Unavailable')) {
+            tentativasRestantes--;
+            if (tentativasRestantes > 0) {
+              await new Promise(r => setTimeout(r, 3000));
+              continue;
+            }
+            return {
+              status: response.status,
+              ok: false,
+              error: 'Servidor retornou HTML (Possível Cold-Start ou instabilidade em Alagoas).',
+              rawHtmlSnippet: textResponse.slice(0, 200)
+            };
+          }
+
+          let jsonResponse;
+          try {
+            jsonResponse = JSON.parse(textResponse);
+          } catch (e) {
+            jsonResponse = { rawText: textResponse };
+          }
+
+          return {
+            status: response.status,
+            ok: response.ok,
+            data: jsonResponse
+          };
+        } catch (err) {
+          tentativasRestantes--;
+          if (tentativasRestantes === 0) {
+            return { status: 500, ok: false, error: err.message };
+          }
+          await new Promise(r => setTimeout(r, 2000));
+        }
       }
     }, {
       candidateName: rawName.toUpperCase().trim(),
@@ -200,8 +219,9 @@ export async function consultarAntecedentesPCAL(dados) {
       return {
         sucesso: false,
         hasRecords: false,
-        statusTexto: 'FALHA NA REQUISIÇÃO API PCAL',
-        mensagem: `A API da PCAL retornou status ${resultadoBusca.status}: ${JSON.stringify(resultadoBusca.data || resultadoBusca.error)}`
+        statusTexto: 'SERVIÇO PCAL INSTÁVEL / COLD-START',
+        mensagem: resultadoBusca.error || `A API da PCAL retornou status ${resultadoBusca.status}.`,
+        rawSnippet: resultadoBusca.rawHtmlSnippet || null
       };
     }
 
