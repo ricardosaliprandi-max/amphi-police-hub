@@ -1,11 +1,11 @@
 /**
- * scraper-pcac.js
+ * scraper-pcac.js (ES Module)
  * Robô de automação para emissão/consulta de Antecedentes Criminais
  * Órgão: Polícia Civil do Estado do Acre (PCAC / IDPOL / Vsoft)
  * Portal: https://idpol.ac.gov.br/services/
  */
 
-const puppeteer = require('puppeteer');
+import puppeteer from 'puppeteer';
 
 /**
  * Função utilitária para formatar data para o padrão do formulário (DD/MM/AAAA)
@@ -48,7 +48,7 @@ function formatarCpf(cpfStr) {
  * @param {Object} payload Objeto recebido com { dados: { nome, cpf, dataNascimento, nomeMae, rg, ... } }
  * @returns {Promise<Object>} Resposta padronizada da checagem
  */
-async function consultarPCAC(payload) {
+export async function consultarAntecedentesPCAC(payload) {
   const dados = payload?.dados || payload || {};
   const nome = String(dados.nome || '').trim().toUpperCase();
   const cpfFormatado = formatarCpf(dados.cpf);
@@ -65,7 +65,7 @@ async function consultarPCAC(payload) {
     console.log(`>> [PCAC] Iniciando varredura para: ${nome} (CPF: ${cpfFormatado})`);
 
     browser = await puppeteer.launch({
-      headless: 'new', // ou true
+      headless: 'new',
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -79,13 +79,12 @@ async function consultarPCAC(payload) {
 
     const page = await browser.newPage();
 
-    // Configura headers e viewport realistas
     await page.setViewport({ width: 1366, height: 768 });
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
 
-    // Variável para capturar respostas diretas da API interna da Vsoft
+    // Interceptação de respostas da API interna da Vsoft
     let apiInterceptedData = null;
     page.on('response', async (response) => {
       const url = response.url();
@@ -108,7 +107,7 @@ async function consultarPCAC(payload) {
       await page.goto(urlFallback, { waitUntil: 'networkidle2', timeout: 30000 });
     }
 
-    // 2. Se caiu na tela inicial com botão/link de antecedentes, clica para entrar
+    // 2. Se caiu na tela inicial com link de antecedentes, clica para entrar
     const linkEmitir = await page.$('a[href*="Antecedentes"], a[href*="Atestado"]');
     if (linkEmitir) {
       await Promise.all([
@@ -122,46 +121,49 @@ async function consultarPCAC(payload) {
     await page.waitForSelector('input#nome', { visible: true, timeout: 20000 });
 
     // 4. Preenchimento seguro dos campos disparando eventos do Vue.js
-    // RG (se informado)
     if (rg) {
       await page.type('input#rg', rg, { delay: 25 });
     }
 
-    // Nome Completo
     await page.click('input#nome');
     await page.type('input#nome', nome, { delay: 30 });
     await page.evaluate(() => {
       const el = document.querySelector('input#nome');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      if (el) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     });
 
-    // Data de Nascimento
     await page.click('input#dataNascimento');
     await page.type('input#dataNascimento', dataNascFormatada, { delay: 30 });
     await page.evaluate(() => {
       const el = document.querySelector('input#dataNascimento');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      if (el) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     });
 
-    // CPF
     await page.click('input#cpf');
     await page.type('input#cpf', cpfFormatado, { delay: 30 });
     await page.evaluate(() => {
       const el = document.querySelector('input#cpf');
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
+      if (el) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
     });
 
-    // Nome da Mãe (campo é input#mae)
     if (nomeMae) {
       await page.click('input#mae');
       await page.type('input#mae', nomeMae, { delay: 30 });
       await page.evaluate(() => {
         const el = document.querySelector('input#mae');
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
+        if (el) {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+        }
       });
     }
 
@@ -171,21 +173,16 @@ async function consultarPCAC(payload) {
     await page.waitForSelector('#btEmitir', { visible: true });
     await Promise.all([
       page.click('#btEmitir'),
-      // Aguarda requisições AJAX ou carregamento do modal/resposta
       page.waitForNetworkIdle({ idleTime: 1000, timeout: 25000 }).catch(() => {}),
     ]);
 
-    // Pausa breve para o Vue processar o modal ou download
     await new Promise((r) => setTimeout(r, 3000));
 
     // 6. Análise dos Resultados
     const resultadoTexto = await page.evaluate(() => {
-      // Verifica se abriu o modal de múltiplos registros
       const tabela = document.querySelector('#corpoTabelaModalResultados');
       const modalVisivel = document.querySelector('#modalResultados.in, #modalResultados[style*="display: block"]');
       const tabelaTemLinhas = tabela && tabela.querySelectorAll('tr').length > 0;
-
-      // Verifica alertas na tela
       const msgNadaConsta = document.querySelector('#MsgNadaConstaQuandoTemAntCrim');
       const alerta = document.querySelector('.alert, .has-error, .help-block');
 
@@ -198,7 +195,6 @@ async function consultarPCAC(payload) {
       };
     });
 
-    // 7. Interpretação das regras da certidão
     const temApontamento =
       resultadoTexto.modalVisivel ||
       resultadoTexto.linhasTabela > 0 ||
@@ -232,7 +228,6 @@ async function consultarPCAC(payload) {
       };
     }
 
-    // Caso padrão: Certidão Negativa / Nada Consta
     return {
       sucesso: true,
       hasRecords: false,
@@ -259,7 +254,6 @@ async function consultarPCAC(payload) {
   }
 }
 
-// Exporta para ser usado pela rota /api/v1/ac/antecedentes do Express no Render
-module.exports = {
-  consultarPCAC,
-};
+// Aliases para cobrir qualquer forma que o seu servidor importe
+export const consultarPCAC = consultarAntecedentesPCAC;
+export default consultarAntecedentesPCAC;
