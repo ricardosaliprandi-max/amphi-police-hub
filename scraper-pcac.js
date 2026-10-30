@@ -1,259 +1,281 @@
 /**
- * scraper-pcac.js (ES Module)
- * Robô de automação para emissão/consulta de Antecedentes Criminais
- * Órgão: Polícia Civil do Estado do Acre (PCAC / IDPOL / Vsoft)
- * Portal: https://idpol.ac.gov.br/services/
+ * Scraper / Conector Oficial - Polícia Civil do Estado do Acre (PCAC)
+ * Portal: https://idpol.ac.gov.br/services/EmitirAAC
+ * Endpoint Oficial iDSPS: https://idpol.ac.gov.br/Vsoft.iDSPS.API/api/atestadoantecedentes/gerar
+ * 
+ * Compatível com Node.js 18+ / 24+ (ES Modules)
  */
 
-import puppeteer from 'puppeteer';
+const ORGAO_EMISSOR = 'Polícia Civil do Estado do Acre (PCAC)';
+const SCRIPT_NAME = 'scraper-pcac.js';
+const URL_PORTAL = 'https://idpol.ac.gov.br/services/EmitirAAC';
+const URL_API_GERAR = 'https://idpol.ac.gov.br/Vsoft.iDSPS.API/api/atestadoantecedentes/gerar';
 
 /**
- * Função utilitária para formatar data para o padrão do formulário (DD/MM/AAAA)
+ * Converte data de nascimento para o formato esperado pela API da PCAC (MM-DD-YYYY)
+ * @param {string} rawDate - Data em DD/MM/YYYY ou YYYY-MM-DD
+ * @returns {string} - Data formatada em MM-DD-YYYY
  */
-function formatarDataNascimento(dataStr) {
-  if (!dataStr) return '';
-  const limpa = String(dataStr).trim();
-  // Se estiver em formato ISO AAAA-MM-DD
-  if (limpa.includes('-')) {
-    const partes = limpa.split('-');
-    if (partes.length === 3 && partes[0].length === 4) {
-      return `${partes[2].padStart(2, '0')}/${partes[1].padStart(2, '0')}/${partes[0]}`;
-    }
+function formatarDataParaApi(rawDate) {
+  if (!rawDate) return '';
+  const clean = String(rawDate).trim();
+  
+  // DD/MM/YYYY
+  if (/^\d{2}\/\d{2}\/\d{4}$/.test(clean)) {
+    const [dia, mes, ano] = clean.split('/');
+    return `${mes}-${dia}-${ano}`;
   }
-  // Se já for DD/MM/AAAA
-  if (limpa.includes('/')) {
-    return limpa;
+  
+  // YYYY-MM-DD
+  if (/^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    const [ano, mes, dia] = clean.split('-');
+    return `${mes}-${dia}-${ano}`;
   }
-  // Se for apenas números DDMMAAAA
-  const apenasNumeros = limpa.replace(/\D/g, '');
-  if (apenasNumeros.length === 8) {
-    return `${apenasNumeros.slice(0, 2)}/${apenasNumeros.slice(2, 4)}/${apenasNumeros.slice(4)}`;
-  }
-  return limpa;
+  
+  return clean;
 }
 
 /**
- * Função utilitária para formatar CPF com pontuação (000.000.000-00)
+ * Formata CPF com pontuação padrão (000.000.000-00) exigida pela máscara da PCAC
+ * @param {string} rawCpf
+ * @returns {string}
  */
-function formatarCpf(cpfStr) {
-  const limpo = String(cpfStr || '').replace(/\D/g, '');
-  if (limpo.length === 11) {
-    return `${limpo.slice(0, 3)}.${limpo.slice(3, 6)}.${limpo.slice(6, 9)}-${limpo.slice(9, 11)}`;
+function formatarCpfMascara(rawCpf) {
+  if (!rawCpf) return '';
+  const digits = String(rawCpf).replace(/\D/g, '');
+  if (digits.length === 11) {
+    return digits.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
   }
-  return limpo;
+  return rawCpf;
 }
 
 /**
- * Executa a automação de consulta na PCAC
- * @param {Object} payload Objeto recebido com { dados: { nome, cpf, dataNascimento, nomeMae, rg, ... } }
- * @returns {Promise<Object>} Resposta padronizada da checagem
+ * Executa a consulta de antecedentes criminais na PCAC
+ * Aceita tanto consultarAntecedentesPCAC(dados) quanto consultarAntecedentesPCAC(browser, dados)
  */
-export async function consultarAntecedentesPCAC(payload) {
-  const dados = payload?.dados || payload || {};
-  const nome = String(dados.nome || '').trim().toUpperCase();
-  const cpfFormatado = formatarCpf(dados.cpf);
-  const dataNascFormatada = formatarDataNascimento(dados.dataNascimento);
-  const nomeMae = String(dados.nomeMae || dados.mae || '').trim().toUpperCase();
-  const rg = String(dados.rg || '').trim().toUpperCase();
+export async function consultarAntecedentesPCAC(param1, param2) {
+  // Tratamento polimórfico de assinatura (com ou sem browser injetado)
+  const isBrowser = param1 && typeof param1.newPage === 'function';
+  const browser = isBrowser ? param1 : null;
+  const rawParams = isBrowser ? param2 : param1;
+  const dados = (rawParams && rawParams.dados) ? rawParams.dados : (rawParams || {});
 
-  const urlAlvo = 'https://idpol.ac.gov.br/services/AtestadoAntecedentes/Emitir';
-  const urlFallback = 'https://idpol.ac.gov.br/services/';
+  const nome = (dados.nome || '').trim().toUpperCase();
+  const cpfComMascara = formatarCpfMascara(dados.cpf || '');
+  const cpfDigitos = (dados.cpf || '').replace(/\D/g, '');
+  const dataNascApi = formatarDataParaApi(dados.dataNascimento || '');
+  const rg = (dados.rg || '').trim();
+  const nomeMae = (dados.nomeMae || '').trim().toUpperCase();
 
-  let browser = null;
+  console.log(`[PCAC] Iniciando consulta para: ${nome} (CPF: ${cpfComMascara})`);
 
-  try {
-    console.log(`>> [PCAC] Iniciando varredura para: ${nome} (CPF: ${cpfFormatado})`);
-
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--disable-gpu',
-      ],
-    });
-
-    const page = await browser.newPage();
-
-    await page.setViewport({ width: 1366, height: 768 });
-    await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Interceptação de respostas da API interna da Vsoft
-    let apiInterceptedData = null;
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (url.includes('Vsoft.iDSPS.API/api') || url.includes('/Emitir') || url.includes('/Validar')) {
-        try {
-          const contentType = response.headers()['content-type'] || '';
-          if (contentType.includes('application/json')) {
-            apiInterceptedData = await response.json();
-            console.log('>> [PCAC] Resposta da API interceptada com sucesso:', JSON.stringify(apiInterceptedData).slice(0, 150));
-          }
-        } catch (_) {}
-      }
-    });
-
-    // 1. Navega para a página de emissão
-    try {
-      await page.goto(urlAlvo, { waitUntil: 'networkidle2', timeout: 30000 });
-    } catch {
-      console.warn('>> [PCAC] Rota direta falhou, tentando rota raiz /services/ ...');
-      await page.goto(urlFallback, { waitUntil: 'networkidle2', timeout: 30000 });
-    }
-
-    // 2. Se caiu na tela inicial com link de antecedentes, clica para entrar
-    const linkEmitir = await page.$('a[href*="Antecedentes"], a[href*="Atestado"]');
-    if (linkEmitir) {
-      await Promise.all([
-        page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 20000 }).catch(() => {}),
-        linkEmitir.click(),
-      ]);
-    }
-
-    // 3. Localiza os campos com waitForSelector explícito
-    console.log('>> [PCAC] Aguardando campo #nome no formulário...');
-    await page.waitForSelector('input#nome', { visible: true, timeout: 20000 });
-
-    // 4. Preenchimento seguro dos campos disparando eventos do Vue.js
-    if (rg) {
-      await page.type('input#rg', rg, { delay: 25 });
-    }
-
-    await page.click('input#nome');
-    await page.type('input#nome', nome, { delay: 30 });
-    await page.evaluate(() => {
-      const el = document.querySelector('input#nome');
-      if (el) {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    });
-
-    await page.click('input#dataNascimento');
-    await page.type('input#dataNascimento', dataNascFormatada, { delay: 30 });
-    await page.evaluate(() => {
-      const el = document.querySelector('input#dataNascimento');
-      if (el) {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    });
-
-    await page.click('input#cpf');
-    await page.type('input#cpf', cpfFormatado, { delay: 30 });
-    await page.evaluate(() => {
-      const el = document.querySelector('input#cpf');
-      if (el) {
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      }
-    });
-
-    if (nomeMae) {
-      await page.click('input#mae');
-      await page.type('input#mae', nomeMae, { delay: 30 });
-      await page.evaluate(() => {
-        const el = document.querySelector('input#mae');
-        if (el) {
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      });
-    }
-
-    console.log('>> [PCAC] Campos preenchidos. Submetendo formulário...');
-
-    // 5. Clica no botão Emitir (#btEmitir)
-    await page.waitForSelector('#btEmitir', { visible: true });
-    await Promise.all([
-      page.click('#btEmitir'),
-      page.waitForNetworkIdle({ idleTime: 1000, timeout: 25000 }).catch(() => {}),
-    ]);
-
-    await new Promise((r) => setTimeout(r, 3000));
-
-    // 6. Análise dos Resultados
-    const resultadoTexto = await page.evaluate(() => {
-      const tabela = document.querySelector('#corpoTabelaModalResultados');
-      const modalVisivel = document.querySelector('#modalResultados.in, #modalResultados[style*="display: block"]');
-      const tabelaTemLinhas = tabela && tabela.querySelectorAll('tr').length > 0;
-      const msgNadaConsta = document.querySelector('#MsgNadaConstaQuandoTemAntCrim');
-      const alerta = document.querySelector('.alert, .has-error, .help-block');
-
-      return {
-        modalVisivel: Boolean(modalVisivel || tabelaTemLinhas),
-        linhasTabela: tabelaTemLinhas ? tabela.querySelectorAll('tr').length : 0,
-        textoAlerta: alerta ? alerta.innerText.trim() : '',
-        msgNadaConsta: msgNadaConsta ? msgNadaConsta.innerText.trim() : '',
-        bodyText: document.body.innerText,
-      };
-    });
-
-    const temApontamento =
-      resultadoTexto.modalVisivel ||
-      resultadoTexto.linhasTabela > 0 ||
-      resultadoTexto.bodyText.toUpperCase().includes('CONSTA') ||
-      resultadoTexto.bodyText.toUpperCase().includes('PROCESSO') ||
-      (apiInterceptedData && apiInterceptedData.temAntecedente === true);
-
-    const isErroValidacao =
-      resultadoTexto.textoAlerta.includes('inválido') ||
-      resultadoTexto.textoAlerta.includes('obrigatório');
-
-    if (isErroValidacao) {
-      return {
-        sucesso: false,
-        hasRecords: false,
-        statusTexto: 'ERRO_VALIDACAO',
-        orgao_emissor: 'Polícia Civil do Estado do Acre (PCAC)',
-        mensagem: resultadoTexto.textoAlerta || 'Dados informados não passaram na validação do portal da PCAC.',
-      };
-    }
-
-    if (temApontamento) {
-      return {
-        sucesso: true,
-        hasRecords: true,
-        statusTexto: 'APONTAMENTO LOCALIZADO',
-        orgao_emissor: 'Polícia Civil do Estado do Acre (PCAC)',
-        portal: 'Portal de Serviços da Polícia Civil do Acre (IDPOL / Vsoft)',
-        mensagem: 'Localizado registro de antecedentes criminais ou multiplicidade cadastral na base da Polícia Civil do Acre.',
-        certidaoUrl: page.url(),
-      };
-    }
-
-    return {
-      sucesso: true,
-      hasRecords: false,
-      statusTexto: 'NADA CONSTA',
-      orgao_emissor: 'Polícia Civil do Estado do Acre (PCAC)',
-      portal: 'Portal de Serviços da Polícia Civil do Acre (IDPOL / Vsoft)',
-      mensagem: 'Certidão Negativa de Antecedentes Criminais gerada com sucesso na base oficial da PCAC.',
-      certidaoUrl: page.url(),
-    };
-  } catch (err) {
-    console.error('>> [PCAC] Erro ao executar scraper:', err.message);
+  if (!cpfDigitos) {
     return {
       sucesso: false,
       hasRecords: false,
-      statusTexto: 'FALHA NA EXECUÇÃO PCAC',
-      orgao_emissor: 'Polícia Civil do Estado do Acre (PCAC)',
-      mensagem: `Falha na consulta ao portal da PCAC: ${err.message}`,
-      error: err.message,
+      statusTexto: 'DADOS_INCOMPLETOS',
+      mensagem: 'CPF é obrigatório para emissão de antecedentes na PCAC.',
+      orgao_emissor: ORGAO_EMISSOR,
+      script: SCRIPT_NAME,
+      detalhes: []
     };
-  } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
+  }
+
+  // ESTRATÉGIA 1: Chamada Direta à API Oficial da PCAC (Rápida, estável e imune a timeout de seletores)
+  try {
+    const apiPayload = {
+      Rg: rg,
+      Nome: nome,
+      DataNascimento: dataNascApi,
+      NomeMae: nomeMae,
+      Cpf: cpfComMascara
+    };
+
+    console.log('[PCAC] Enviando payload para API oficial:', JSON.stringify(apiPayload));
+
+    const response = await fetch(URL_API_GERAR, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': URL_PORTAL,
+        'Origin': 'https://idpol.ac.gov.br'
+      },
+      body: JSON.stringify(apiPayload)
+    });
+
+    const status = response.status;
+    const responseText = await response.text();
+    console.log(`[PCAC] Resposta da API oficial (HTTP ${status}):`, responseText.slice(0, 300));
+
+    // CENÁRIO A: HTTP 200 - Registros retornados (Array JSON)
+    if (status === 200) {
+      let registros = [];
+      try {
+        registros = JSON.parse(responseText);
+      } catch (e) {
+        registros = [];
+      }
+
+      if (Array.isArray(registros) && registros.length > 0) {
+        const primeiro = registros[0];
+        const hasCriminal = Boolean(primeiro.HasCriminal);
+
+        if (!hasCriminal) {
+          // Nada Consta Emitido!
+          const pdfUrl = `${URL_API_GERAR}?rg=${encodeURIComponent(primeiro.Rg || rg)}&nome=${encodeURIComponent(primeiro.Nome || nome)}&dataNascimento=${encodeURIComponent(primeiro.DataNascimento || dataNascApi)}&nomeMae=${encodeURIComponent(primeiro.NomeMae || nomeMae)}&nomePai=${encodeURIComponent(primeiro.NomePai || '')}&cpf=${encodeURIComponent(primeiro.Cpf || cpfComMascara)}&hasCriminal=false&oid=${encodeURIComponent(primeiro.OidAtestado || '')}`;
+
+          return {
+            sucesso: true,
+            hasRecords: false,
+            statusTexto: 'NADA_CONSTA',
+            mensagem: 'Certidão Negativa de Antecedentes Criminais emitida com sucesso.',
+            certidaoUrl: pdfUrl,
+            orgao_emissor: ORGAO_EMISSOR,
+            script: SCRIPT_NAME,
+            rawSnippet: `Certidão PCAC emitida. OID: ${primeiro.OidAtestado || 'Oficial'}`,
+            detalhes: [
+              {
+                orgao: ORGAO_EMISSOR,
+                data: new Date().toLocaleDateString('pt-BR'),
+                descricao: `Certidão Negativa de Antecedentes Criminais gerada pelo portal oficial da PCAC para ${primeiro.Nome || nome}.`
+              }
+            ]
+          };
+        } else {
+          // Constam Apontamentos Criminais
+          return {
+            sucesso: true,
+            hasRecords: true,
+            statusTexto: 'APONTAMENTOS_LOCALIZADOS',
+            mensagem: 'Constam registros/apontamentos nos arquivos do Instituto de Identificação da PCAC.',
+            orgao_emissor: ORGAO_EMISSOR,
+            script: SCRIPT_NAME,
+            rawSnippet: 'Não foi possível emitir nada consta para os dados fornecidos. Consta registro criminal.',
+            detalhes: [
+              {
+                orgao: ORGAO_EMISSOR,
+                data: new Date().toLocaleDateString('pt-BR'),
+                descricao: 'Apontamento criminal localizado nos registros estaduais do Acre. Comparecimento presencial requerido.'
+              }
+            ]
+          };
+        }
+      }
+    }
+
+    // CENÁRIO B: HTTP 301 - Cidadão sem cadastro biométrico prévio no Estado do Acre
+    if (status === 301 || responseText.includes('Não foi encontrado nenhum regitro') || responseText.includes('EmitirNC/Confirmacao')) {
+      return {
+        sucesso: true,
+        hasRecords: false,
+        statusTexto: 'REGISTRO_NAO_ENCONTRADO',
+        mensagem: 'Não foi localizado registro biométrico civil prévio no Estado do Acre. Emissão on-line restrita à base cadastrada.',
+        orgao_emissor: ORGAO_EMISSOR,
+        script: SCRIPT_NAME,
+        rawSnippet: 'Não foi encontrado nenhum registro no banco de dados da PCAC. Dirija-se ao Instituto para emissão presencial.',
+        detalhes: [
+          {
+            orgao: ORGAO_EMISSOR,
+            data: new Date().toLocaleDateString('pt-BR'),
+            descricao: 'Cidadão sem prontuário de identificação civil cadastrado no Instituto de Identificação da Polícia Civil do Acre.'
+          }
+        ]
+      };
+    }
+
+    // CENÁRIO C: HTTP 400 - Dados divergentes da Receita Federal
+    if (status === 400) {
+      let cleanMsg = responseText.replace(/^"|"$/g, '').trim();
+      return {
+        sucesso: false,
+        hasRecords: false,
+        statusTexto: 'DADOS_DIVERGENTES',
+        mensagem: cleanMsg || 'Os dados informados não conferem com o cadastro oficial da Receita Federal.',
+        error: cleanMsg,
+        orgao_emissor: ORGAO_EMISSOR,
+        script: SCRIPT_NAME,
+        detalhes: []
+      };
+    }
+  } catch (apiError) {
+    console.warn('[PCAC] Falha na chamada da API direta, tentando fallback:', apiError.message);
+  }
+
+  // ESTRATÉGIA 2: Fallback com Puppeteer (apenas se a API direta falhar e o browser estiver disponível)
+  if (browser) {
+    let page = null;
+    try {
+      console.log('[PCAC] Executando fallback via Puppeteer...');
+      page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+      await page.setViewport({ width: 1280, height: 800 });
+
+      // Timeout amplo e waitUntil mais permissivo para evitar travar no IIS
+      await page.goto(URL_PORTAL, { waitUntil: 'domcontentloaded', timeout: 35000 });
+
+      // Verifica se a página atual é a do formulário ou se caiu no menu
+      const currentUrl = page.url();
+      if (!currentUrl.includes('EmitirAAC')) {
+        console.log('[PCAC] Redirecionado para menu. Navegando para EmitirAAC...');
+        await page.goto(URL_PORTAL, { waitUntil: 'domcontentloaded', timeout: 25000 });
+      }
+
+      // Procura o seletor com tolerância
+      const inputNome = await page.waitForSelector('#nome, input#nome, input[name="nome"]', { timeout: 12000 }).catch(() => null);
+
+      if (inputNome) {
+        if (rg) await page.type('#rg', rg);
+        await page.type('#nome', nome);
+        if (dados.dataNascimento) {
+          const dtFormatada = dados.dataNascimento.includes('-') 
+            ? dados.dataNascimento.split('-').reverse().join('/') 
+            : dados.dataNascimento;
+          await page.type('#dataNascimento', dtFormatada);
+        }
+        await page.type('#cpf', cpfComMascara);
+        if (nomeMae) await page.type('#mae', nomeMae);
+
+        await Promise.all([
+          page.click('#btEmitir').catch(() => {}),
+          page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20000 }).catch(() => {})
+        ]);
+
+        const bodyContent = await page.content();
+        if (bodyContent.includes('Não foi encontrado nenhum regitro') || page.url().includes('Confirmacao')) {
+          return {
+            sucesso: true,
+            hasRecords: false,
+            statusTexto: 'REGISTRO_NAO_ENCONTRADO',
+            mensagem: 'Não foi encontrado registro biométrico no Estado do Acre.',
+            orgao_emissor: ORGAO_EMISSOR,
+            script: SCRIPT_NAME,
+            detalhes: []
+          };
+        }
+      }
+    } catch (puppetErr) {
+      console.error('[PCAC] Falha no fallback do Puppeteer:', puppetErr.message);
+    } finally {
+      if (page) await page.close().catch(() => {});
     }
   }
+
+  // Retorno caso nenhuma estratégia obtenha resposta
+  return {
+    sucesso: false,
+    hasRecords: false,
+    statusTexto: 'FALHA_CONSULTA',
+    mensagem: 'Falha temporária de comunicação com o portal da PCAC.',
+    error: 'Não foi possível completar a consulta no portal da PCAC.',
+    orgao_emissor: ORGAO_EMISSOR,
+    script: SCRIPT_NAME,
+    detalhes: []
+  };
 }
 
-// Aliases para cobrir qualquer forma que o seu servidor importe
+// Aliases para máxima compatibilidade com o router do Render
 export const consultarPCAC = consultarAntecedentesPCAC;
 export default consultarAntecedentesPCAC;
