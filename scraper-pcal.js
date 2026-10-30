@@ -37,7 +37,7 @@ export async function consultarAntecedentesPCAL(dados) {
 
     await page.setViewport({ width: 1280, height: 800 });
 
-    // Interceptação rigorosa de recursos para economizar RAM no Render
+    // Interceptação defensiva de recursos estáticos para economizar RAM no Render
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
@@ -94,20 +94,68 @@ export async function consultarAntecedentesPCAL(dados) {
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
 
-    // 3. Execução da chamada HTTP assíncrona (fetch) diretamente no contexto do navegador
-    const resultadoBusca = await page.evaluate(async (payload, apiTokens) => {
+    // 3. Auditoria e interceptação de rede para capturar o endpoint POST real da API da Vsoft
+    let endpointRealDaApi = null;
+    page.on('request', interceptedRequest => {
+      const url = interceptedRequest.url();
+      if (url.includes('/api/') && interceptedRequest.method() === 'POST') {
+        endpointRealDaApi = url;
+      }
+      interceptedRequest.continue();
+    });
+
+    // Preenchimento dos campos reais mapeados no HTML (#rg, #orgaoExpedidor, #nome, #dataNascimento, #cpf, #mae, #pai)
+    await page.evaluate((payload) => {
+      if (document.querySelector('#rg')) document.querySelector('#rg').value = payload.rg || '';
+      if (document.querySelector('#orgaoExpedidor')) document.querySelector('#orgaoExpedidor').value = payload.orgaoExpedidor || 'SSP';
+      if (document.querySelector('#nome')) document.querySelector('#nome').value = payload.candidateName || '';
+      if (document.querySelector('#dataNascimento')) document.querySelector('#dataNascimento').value = payload.dataFormatada || '';
+      if (document.querySelector('#cpf')) document.querySelector('#cpf').value = payload.candidateCpf || '';
+      if (document.querySelector('#mae')) document.querySelector('#mae').value = payload.motherName || '';
+      if (document.querySelector('#pai')) document.querySelector('#pai').value = payload.fatherName || '';
+    }, {
+      candidateName: rawName.toUpperCase().trim(),
+      candidateCpf: cpfLimpo,
+      rg: rgLimpo,
+      orgaoExpedidor: rawOrgao.toUpperCase().trim(),
+      dataFormatada,
+      motherName: rawMother.toUpperCase().trim(),
+      fatherName: rawFather.toUpperCase().trim()
+    });
+
+    // Dispara o clique no botão de emissão (#btEmitir) para o portal iniciar a requisição AJAX
+    console.log('[PCAL] Disparando botão de emissão para acionar a API...');
+    await page.click('#btEmitir').catch(async () => {
+      await page.evaluate(() => document.getElementById('btEmitir').click());
+    });
+
+    // Aguarda o ciclo de requisição assíncrona ser capturado pelo listener de rede
+    let tentativas = 0;
+    while (!endpointRealDaApi && tentativas < 15) {
+      await new Promise(r => setTimeout(r, 400));
+      tentativas++;
+    }
+
+    if (!endpointRealDaApi) {
+      throw new Error('O scraper não conseguiu interceptar a URL de POST da API da PCAL durante o disparo do formulário.');
+    }
+
+    console.log(`[PCAL] Endpoint real descoberto via rede: ${endpointRealDaApi}`);
+
+    // 4. Execução da chamada direta na API utilizando a rota validada e os tokens capturados
+    const resultadoBusca = await page.evaluate(async (payload, apiTokens, apiUrl) => {
       const bodyData = {
         Cpf: payload.cpfLimpo,
         Rg: payload.rgLimpo,
-        OrgaoExpedidor: (payload.orgaoExpedidor || 'SSP').toUpperCase(),
-        Nome: (payload.candidateName || '').toUpperCase().trim(),
+        OrgaoExpedidor: payload.orgaoExpedidor,
+        Nome: payload.candidateName,
         DataNascimento: payload.dataFormatada,
-        NomeMae: (payload.motherName || '').toUpperCase().trim(),
-        NomePai: (payload.fatherName || '').toUpperCase().trim()
+        NomeMae: payload.motherName,
+        NomePai: payload.fatherName
       };
 
       try {
-        const response = await fetch('https://idseg.institutodeidentificacao.al.gov.br/Vsoft.iDSps.API/api/antecedentes/emitir', {
+        const response = await fetch(apiUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -139,14 +187,14 @@ export async function consultarAntecedentesPCAL(dados) {
         };
       }
     }, {
-      candidateName: rawName,
+      candidateName: rawName.toUpperCase().trim(),
       cpfLimpo,
       rgLimpo,
-      orgaoExpedidor: rawOrgao,
+      orgaoExpedidor: rawOrgao.toUpperCase().trim(),
       dataFormatada,
-      motherName: rawMother,
-      fatherName: rawFather
-    }, tokens);
+      motherName: rawMother.toUpperCase().trim(),
+      fatherName: rawFather.toUpperCase().trim()
+    }, tokens, endpointRealDaApi);
 
     if (!resultadoBusca.ok) {
       return {
