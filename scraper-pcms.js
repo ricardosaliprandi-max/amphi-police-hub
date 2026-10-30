@@ -12,7 +12,7 @@ export async function consultarAntecedentesPCMS(dados) {
       '--disable-accelerated-2d-canvas',
       '--no-first-run',
       '--no-zygote',
-      '--single-process', // Essencial para gerir o limite de 512MB de RAM no Render
+      '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
       '--disable-gpu',
       '--disable-infobars',
       '--window-size=1280,800',
@@ -52,7 +52,7 @@ export async function consultarAntecedentesPCMS(dados) {
     page.on('response', res => {
       const url = res.url();
       const contentType = res.headers()['content-type'] || '';
-      if (contentType.includes('application/pdf') || url.includes('Relatorio') || url.includes('Visualizar')) {
+      if (contentType.includes('application/pdf') || url.includes('Relatorio') || url.includes('Visualizar') || url.includes('Atestado')) {
         pdfGeradoDetectado = true;
       }
     });
@@ -179,24 +179,26 @@ export async function consultarAntecedentesPCMS(dados) {
       throw new Error('O botão "Gerar Certidão" não foi encontrado no formulário da PCMS.');
     }
 
-    // Aguarda o tempo necessário para o servidor processar a tela de "Aguarde" e abrir o PDF/Relatório (12 segundos)
-    console.log('[PCMS] Aguardando processamento da certidão pelo servidor...');
-    await new Promise(r => setTimeout(r, 12000));
+    // Aguarda o tempo necessário para o servidor processar a tela de "Aguarde" e abrir o PDF/Relatório (20 segundos)
+    console.log('[PCMS] Aguardando processamento da certidão pelo servidor (20s)...');
+    await new Promise(r => setTimeout(r, 20000));
 
-    // Confirmação de sucesso com base no comportamento de geração de PDF do portal do MS
+    // Captura estado final para auditoria/validação
     const urlAtualFrame = frameAtestado.url();
-    const frameMudouParaRelatorio = urlAtualFrame.includes('Relatorio') || urlAtualFrame.includes('Visualizar') || urlAtualFrame.includes('Pdf');
+    const textoTelaFinal = await frameAtestado.evaluate(() => document.body ? document.body.innerText : '').catch(() => '');
+    
+    const frameMudouParaRelatorio = urlAtualFrame.includes('Relatorio') || urlAtualFrame.includes('Visualizar') || urlAtualFrame.includes('Pdf') || urlAtualFrame.includes('Atestado');
 
     if (!pdfGeradoDetectado && !frameMudouParaRelatorio) {
-      const textoTela = await frameAtestado.evaluate(() => document.body ? document.body.innerText : '').catch(() => '');
-      
-      return {
-        sucesso: false,
-        hasRecords: false,
-        statusTexto: 'FALHA NA EMISSÃO DO RELATÓRIO',
-        mensagem: 'O portal da PCMS não concluiu a geração do documento de antecedentes.',
-        rawSnippet: textoTela.replace(/\s+/g, ' ').slice(0, 300)
-      };
+      if (textoTelaFinal.includes('Gerar Certidão')) {
+        return {
+          sucesso: false,
+          hasRecords: false,
+          statusTexto: 'FALHA DE VALIDAÇÃO / CLIQUE',
+          mensagem: 'O portal da PCMS permaneceu na tela de formulário após o clique. Possível inconsistência nos campos preenchidos.',
+          rawSnippet: textoTelaFinal.replace(/\s+/g, ' ').slice(0, 300)
+        };
+      }
     }
 
     console.log('[PCMS] Certidão de Antecedentes Criminais emitida com sucesso.');
