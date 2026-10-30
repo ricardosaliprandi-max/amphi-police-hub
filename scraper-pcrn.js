@@ -5,40 +5,51 @@ export async function consultarAntecedentesPCRN(dados) {
   
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--single-process',
+      '--disable-gpu'
+    ]
   });
 
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 800 });
 
-    // Interceptação rigorosa de TODAS as requisições de rede para auditoria
+    // Interceptação defensiva de recursos estáticos para evitar lentidão e timeout
+    await page.setRequestInterception(true);
     page.on('request', req => {
+      const resourceType = req.resourceType();
       const url = req.url();
-      console.log(`[PCRN DEBUG REDE] Método: ${req.method()} | URL: ${url}`);
-      if (req.method() === 'POST' || req.method() === 'GET') {
-        const postData = req.postData();
-        if (postData) {
-          console.log(`[PCRN DEBUG PAYLOAD]:`, postData);
+      if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+        if (req.method() === 'GET' || req.method() === 'POST') {
+          console.log(`[PCRN DEBUG REDE] Método: ${req.method()} | URL: ${url}`);
         }
       }
     });
 
-    // Interceptação de respostas para inspecionar o retorno (ex: PDF ou JSON)
+    // Monitora respostas para capturar a rota de PDF
     page.on('response', async res => {
       const url = res.url();
       const contentType = res.headers()['content-type'] || '';
-      if (url.includes('gerarDeclaracaoEmPDF') || contentType.includes('application/pdf') || contentType.includes('json')) {
+      if (url.includes('gerarDeclaracaoEmPDF') || contentType.includes('application/pdf')) {
         console.log(`[PCRN DEBUG RESPOSTA] URL: ${url} | Content-Type: ${contentType} | Status: ${res.status()}`);
       }
     });
 
-    console.log(`[PCRN DEBUG] Acessando portal do Rio Grande do Norte...`);
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 });
+    console.log(`[PCRN DEBUG] Acessando portal do Rio Grande do Norte (com timeout estendido)...`);
+    
+    // Usamos domcontentloaded e elevamos o timeout para 50s
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 50000 });
 
-    // Aguarda os inputs do formulário estarem presentes com base no HTML fornecido
-    await page.waitForSelector('#nomeCompleto', { timeout: 10000 });
-    await page.waitForSelector('#cpf', { timeout: 10000 });
+    // Aguarda os inputs do formulário estarem presentes
+    await page.waitForSelector('#nomeCompleto', { timeout: 15000 });
+    await page.waitForSelector('#cpf', { timeout: 15000 });
 
     // Normalização dos dados de entrada
     const rawCpf = dados.candidateCpf || dados.cpf || '';
@@ -68,12 +79,11 @@ export async function consultarAntecedentesPCRN(dados) {
 
     await new Promise(r => setTimeout(r, 1000));
 
-    // Clica no botão #btnDeclaracao para submeter o formulário
+    // Clica no botão #btnDeclaracao e aguarda a submissão (ação GET para gerar o PDF)
     console.log('[PCRN DEBUG] Clicando no botão #btnDeclaracao...');
     
-    // Como a action do form é GET para /siscert/Home/gerarDeclaracaoEmPDF, podemos clicar ou monitorar a navegação
-    const [response] = await Promise.all([
-      page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => null),
+    await Promise.all([
+      page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 20000 }).catch(() => null),
       page.click('#btnDeclaracao').catch(async () => {
         await page.evaluate(() => document.getElementById('btnDeclaracao').click());
       })
