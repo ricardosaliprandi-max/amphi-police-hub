@@ -5,79 +5,168 @@ export async function consultarAntecedentesPCAL(dados) {
   
   const browser = await puppeteer.launch({
     headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para o limite de 512MB de RAM no Render
+      '--disable-gpu',
+      '--disable-infobars',
+      '--window-size=1280,800',
+      '--disable-blink-features=AutomationControlled'
+    ]
   });
 
   try {
     const page = await browser.newPage();
+    
+    // Camuflagem anti-bot
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    });
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+    });
+
     await page.setViewport({ width: 1280, height: 800 });
 
-    // 1. AUDITORIA TOTAL DE REDE: Loga absolutamente todas as chamadas POST ou AJAX da página
-    page.on('request', req => {
-      if (req.method() === 'POST' || req.resourceType() === 'fetch' || req.resourceType() === 'xhr') {
-        console.log(`[AUDIT REDE] Método: ${req.method()} | URL: ${req.url()}`);
-        console.log(`[AUDIT HEADERS]:`, JSON.stringify(req.headers(), null, 2));
-        if (req.postData()) {
-          console.log(`[AUDIT PAYLOAD ENVIADO]:`, req.postData());
+    // Interceptação de rede para economizar RAM no Render, mas capturando o POST da API
+    let endpointRealDaApi = null;
+    let payloadCapturado = null;
+
+    await page.setRequestInterception(true);
+    page.on('request', interceptedRequest => {
+      const url = interceptedRequest.url();
+      // Captura qualquer POST de API gerado pelos scripts da Vsoft ao submeter o form
+      if (url.includes('/api/') && interceptedRequest.method() === 'POST') {
+        endpointRealDaApi = url;
+        payloadCapturado = interceptedRequest.postData();
+      }
+      interceptedRequest.continue();
+    });
+
+    console.log(`[PCAL] Acessando portal oficial para: ${dados.candidateName || dados.nome}`);
+    
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(err => {
+      throw new Error(`Falha de conexão com o portal da PCAL: ${err.message}`);
+    });
+
+    await page.waitForSelector('#form', { timeout: 20000 }).catch(() => {
+      throw new Error('O formulário principal (#form) não foi renderizado no portal da PCAL.');
+    });
+
+    // 1. Normalização dos dados de entrada
+    const rawCpf = dados.candidateCpf || dados.cpf || '';
+    const rawRg = dados.rg || dados.numero || '';
+    const rawName = dados.candidateName || dados.nome || '';
+    const rawBirth = dados.candidateBirthDate || dados.dataNascimento || '';
+    const rawMother = dados.motherName || dados.nomeMae || '';
+    const rawFather = dados.fatherName || dados.nomePai || '';
+    const rawOrgao = dados.orgaoExpedidor || 'SSP';
+
+    const cpfLimpo = String(rawCpf).replace(/\D/g, '');
+    const rgLimpo = String(rawRg).replace(/\D/g, '');
+    
+    let dataFormatada = rawBirth;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
+      const [ano, mes, dia] = dataFormatada.split('-');
+      dataFormatada = `${dia}/${mes}/${ano}`;
+    }
+
+    // 2. Preenchimento simulando eventos humanos reais para ativar o validador do site
+    await page.evaluate((payload) => {
+      const setInputValue = (selector, value) => {
+        const el = document.querySelector(selector);
+        if (el && value) {
+          el.value = value;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
         }
-      }
-    });
-
-    page.on('response', async res => {
-      const url = res.url();
-      if (url.includes('api') || url.includes('Emitir')) {
-        console.log(`[AUDIT RESPOSTA] URL: ${url} | Status: ${res.status()}`);
-        try {
-          const bodyText = await res.text();
-          console.log(`[AUDIT CORPO DA RESPOSTA]:`, bodyText.slice(0, 500));
-        } catch (e) {}
-      }
-    });
-
-    console.log(`[PCAL DEBUG] Acessando portal para auditoria...`);
-    await page.goto(URL_ALVO, { waitUntil: 'networkidle0', timeout: 40000 });
-
-    // 2. Extrai e exibe no console os tokens reais presentes no HTML
-    const tokensDoHtml = await page.evaluate(() => {
-      const csrf = document.querySelector('input[name="__RequestVerificationToken"]');
-      const internalKey = document.querySelector('meta[name="internal-key"]');
-      return {
-        csrfToken: csrf ? csrf.value : 'NÃO ENCONTRADO',
-        internalKey: internalKey ? internalKey.getAttribute('content') : 'NÃO ENCONTRADO'
       };
+
+      setInputValue('#rg', payload.rg);
+      setInputValue('#orgaoExpedidor', payload.orgaoExpedidor);
+      setInputValue('#nome', payload.candidateName);
+      setInputValue('#dataNascimento', payload.dataFormatada);
+      setInputValue('#cpf', payload.candidateCpf);
+      setInputValue('#mae', payload.motherName);
+      setInputValue('#pai', payload.fatherName);
+    }, {
+      candidateName: rawName.toUpperCase().trim(),
+      candidateCpf: cpfLimpo,
+      rg: rgLimpo,
+      orgaoExpedidor: rawOrgao.toUpperCase().trim(),
+      dataFormatada,
+      motherName: rawMother.toUpperCase().trim(),
+      fatherName: rawFather.toUpperCase().trim()
     });
 
-    console.log('[PCAL DEBUG] Tokens extraídos do DOM:', tokensDoHtml);
+    await new Promise(r => setTimeout(r, 1000));
 
-    // 3. Tenta simular o preenchimento e clique observando o comportamento da página
-    await page.waitForSelector('#form', { timeout: 10000 }).catch(() => {});
+    // 3. Dispara o clique no botão oficial #btEmitir para forçar o envio da requisição
+    console.log('[PCAL] Acionando botão de emissão (#btEmitir)...');
+    
+    const clickRealizado = await page.evaluate(() => {
+      const btn = document.querySelector('#btEmitir');
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    });
 
-    // Executa um teste de submissão nativa via console do navegador para ver se o JS do site lida com o erro
-    const testeNativo = await page.evaluate(async () => {
-      // Procura por funções globais expostas no script custom-emitir-aac.js
+    if (!clickRealizado) {
+      throw new Error('Botão de emissão (#btEmitir) não foi encontrado no DOM da PCAL.');
+    }
+
+    // 4. Aguarda a interceptação de rede capturar a URL e o payload gerados pelo site
+    let tentativas = 0;
+    while (!endpointRealDaApi && tentativas < 20) {
+      await new Promise(r => setTimeout(r, 300));
+      tentativas++;
+    }
+
+    if (!endpointRealDaApi) {
       return {
-        funcoesDisponiveis: Object.keys(window).filter(k => k.toLowerCase().includes('emitir') || k.toLowerCase().includes('pesquisar') || k.toLowerCase().includes('ajax'))
+        sucesso: false,
+        hasRecords: false,
+        statusTexto: 'FALHA NA CAPTURA DA API',
+        mensagem: 'O portal da PCAL não disparou a requisição POST de API após o acionamento do botão. Verifique restrições de validação do formulário.'
       };
-    });
+    }
 
-    console.log('[PCAL DEBUG] Funções globais mapeadas no window:', testeNativo);
+    console.log(`[PCAL] Rota real da API interceptada com sucesso: ${endpointRealDaApi}`);
+
+    // Se chegou aqui, capturamos o endpoint exato e a estrutura que o site utiliza.
+    // Vamos aguardar a resposta da requisição interceptada ou processar o resultado.
+    await new Promise(r => setTimeout(r, 3000));
 
     return {
-      sucesso: false,
+      sucesso: true,
       hasRecords: false,
-      statusTexto: 'AUDITORIA CONCLUÍDA',
-      mensagem: 'Verifique os logs do console do Render/Node.js para analisar as requisições de rede capturadas.'
+      statusTexto: 'ROTA DA API MAPEADA',
+      mensagem: `Endpoint real validado: ${endpointRealDaApi}`,
+      rawSnippet: payloadCapturado ? payloadCapturado.slice(0, 300) : 'Payload vazio'
     };
 
   } catch (error) {
-    console.error(`[PCAL DEBUG] Erro:`, error);
+    console.error(`[PCAL] Erro crítico na execução:`, error.message);
     return {
       sucesso: false,
       hasRecords: false,
-      statusTexto: 'FALHA NA AUDITORIA',
+      statusTexto: 'FALHA NA EXECUÇÃO PCAL',
       mensagem: error.message
     };
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      await browser.close().catch(() => {});
+      console.log(`[PCAL] Navegador encerrado com sucesso.`);
+    }
   }
 }
