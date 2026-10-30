@@ -1,116 +1,177 @@
 import puppeteer from 'puppeteer';
 
-export async function consultarAntecedentesPCAL(payload) {
-  const URL_ALVO = 'https://idseg.institutodeidentificacao.al.gov.br/Vsoft.iDSPS.Agendamento/AntecedentesCriminais/Emitir';
-  let browser = null;
-
-  const dados = payload?.dados && typeof payload.dados === 'object' 
-    ? { ...payload.dados, ...payload } 
-    : (payload || {});
-
-  const nome = (dados.nome || '').toUpperCase().trim();
-  const mae = (dados.nomeMae || dados.mae || '').toUpperCase().trim();
-  const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
-  const docLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
-
-  let dataFormatada = dados.dataNascimento || dados.dtNascimento || '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
-    const [ano, mes, dia] = dataFormatada.split('-');
-    dataFormatada = `${dia}/${mes}/${ano}`;
-  }
+export async function consultarAntecedentesPCAL(dados) {
+  const URL_ALVO = 'https://idseg.institutodeidentificacao.al.gov.br/Vsoft.iDSPS.Agendamento/EmitirAAC';
+  
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--no-first-run',
+      '--no-zygote',
+      '--single-process', // Essencial para gerir o limite estrito de 512MB de RAM no Render
+      '--disable-gpu',
+      '--disable-infobars',
+      '--window-size=1280,800',
+      '--disable-blink-features=AutomationControlled'
+    ]
+  });
 
   try {
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--no-first-run',
-        '--no-zygote',
-        '--single-process',
-        '--disable-gpu'
-      ]
+    const page = await browser.newPage();
+    
+    // Camuflagem rigorosa anti-bot / WAF
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8'
     });
 
-    const page = await browser.newPage();
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
+    });
+
     await page.setViewport({ width: 1280, height: 800 });
 
+    // Interceptação rigorosa de recursos para economizar RAM no Render
     await page.setRequestInterception(true);
     page.on('request', (req) => {
-      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(req.resourceType())) {
+      const resourceType = req.resourceType();
+      if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
         req.abort();
       } else {
         req.continue();
       }
     });
 
-    console.log(`[PCAL] Acessando portal oficial para: ${nome}`);
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 35000 });
-    await page.waitForSelector('input', { timeout: 15000 }).catch(() => {});
-
-    async function preencherCampo(seletores, valor) {
-      if (!valor) return false;
-      for (const seletor of seletores) {
-        try {
-          const el = await page.$(seletor);
-          if (el) {
-            await page.focus(seletor);
-            await page.evaluate(s => document.querySelector(s).value = '', seletor);
-            await page.type(seletor, String(valor), { delay: 25 });
-            return true;
-          }
-        } catch (e) {}
-      }
-      return false;
-    }
-
-    if (docLimpo) {
-      await preencherCampo(['#rg', 'input[name*="rg" i]', 'input[id*="rg" i]'], docLimpo);
-    }
-    await preencherCampo(['#orgaoExpedidor', 'input[name*="orgao" i]', 'input[id*="orgao" i]'], (dados.orgaoExpedidor || 'SSP').toUpperCase());
-
-    const nomePreenchido = await preencherCampo(['#nome', 'input[name*="nome" i]', 'input[id*="nome" i]'], nome);
-    if (!nomePreenchido) {
-      throw new Error('Campo de nome não localizado no formulário da PCAL.');
-    }
-
-    await preencherCampo(['#dataNascimento', 'input[name*="nascimento" i]', 'input[id*="nascimento" i]'], dataFormatada);
+    console.log(`[PCAL] Acessando portal de Alagoas para: ${dados.candidateName || dados.nome}`);
     
-    let cpfComMascara = cpfLimpo;
-    if (cpfLimpo.length === 11) {
-      cpfComMascara = cpfLimpo.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/, '$1.$2.$3-$4');
-    }
-    await preencherCampo(['#cpf', 'input[name*="cpf" i]', 'input[id*="cpf" i]'], cpfComMascara);
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(err => {
+      throw new Error(`Falha de conexão com o portal da PCAL: ${err.message}`);
+    });
 
-    if (mae) {
-      await preencherCampo(['#mae', 'input[name*="mae" i]', 'input[id*="mae" i]'], mae);
-    }
+    // Aguarda o formulário principal carregar
+    await page.waitForSelector('#form', { timeout: 20000 }).catch(() => {
+      throw new Error('O formulário principal (#form) não foi renderizado no portal da PCAL.');
+    });
 
-    await new Promise(r => setTimeout(r, 2500));
-    const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
-
-    if (resultadoTexto.toUpperCase().includes('NADA CONSTA') || resultadoTexto.toUpperCase().includes('CERTIDÃO NEGATIVA')) {
+    // 1. Extração dos Tokens de Segurança do DOM (Anti-CSRF e Internal Key)
+    const tokens = await page.evaluate(() => {
+      const csrfEl = document.querySelector('input[name="__RequestVerificationToken"]');
+      const internalEl = document.querySelector('meta[name="internal-key"]');
+      
       return {
-        sucesso: true,
+        requestVerificationToken: csrfEl ? csrfEl.value : null,
+        internalKey: internalEl ? internalEl.getAttribute('content') : null
+      };
+    });
+
+    if (!tokens.requestVerificationToken || !tokens.internalKey) {
+      throw new Error('Não foi possível extrair os tokens de segurança (__RequestVerificationToken ou internal-key) do portal PCAL.');
+    }
+
+    console.log('[PCAL] Tokens de segurança extraídos com sucesso.');
+
+    // 2. Normalização de dados recebidos do payload canônico/Zod
+    const rawCpf = dados.candidateCpf || dados.cpf || '';
+    const rawRg = dados.rg || dados.numero || '';
+    const rawName = dados.candidateName || dados.nome || '';
+    const rawBirth = dados.candidateBirthDate || dados.dataNascimento || '';
+    const rawMother = dados.motherName || dados.nomeMae || '';
+    const rawFather = dados.fatherName || dados.nomePai || '';
+    const rawOrgao = dados.orgaoExpedidor || 'SSP';
+
+    const cpfLimpo = String(rawCpf).replace(/\D/g, '');
+    const rgLimpo = String(rawRg).replace(/\D/g, '');
+    
+    let dataFormatada = rawBirth;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
+      const [ano, mes, dia] = dataFormatada.split('-');
+      dataFormatada = `${dia}/${mes}/${ano}`;
+    }
+
+    // 3. Execução da chamada HTTP assíncrona (fetch) diretamente no contexto do navegador
+    const resultadoBusca = await page.evaluate(async (payload, apiTokens) => {
+      const bodyData = {
+        Cpf: payload.cpfLimpo,
+        Rg: payload.rgLimpo,
+        OrgaoExpedidor: (payload.orgaoExpedidor || 'SSP').toUpperCase(),
+        Nome: (payload.candidateName || '').toUpperCase().trim(),
+        DataNascimento: payload.dataFormatada,
+        NomeMae: (payload.motherName || '').toUpperCase().trim(),
+        NomePai: (payload.fatherName || '').toUpperCase().trim()
+      };
+
+      try {
+        const response = await fetch('https://idseg.institutodeidentificacao.al.gov.br/Vsoft.iDSps.API/api/antecedentes/emitir', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            'RequestVerificationToken': apiTokens.requestVerificationToken,
+            'X-Internal-Key': apiTokens.internalKey
+          },
+          body: JSON.stringify(bodyData)
+        });
+
+        const textResponse = await response.text();
+        let jsonResponse;
+        try {
+          jsonResponse = JSON.parse(textResponse);
+        } catch (e) {
+          jsonResponse = { rawText: textResponse };
+        }
+
+        return {
+          status: response.status,
+          ok: response.ok,
+          data: jsonResponse
+        };
+      } catch (err) {
+        return {
+          status: 500,
+          ok: false,
+          error: err.message
+        };
+      }
+    }, {
+      candidateName: rawName,
+      cpfLimpo,
+      rgLimpo,
+      orgaoExpedidor: rawOrgao,
+      dataFormatada,
+      motherName: rawMother,
+      fatherName: rawFather
+    }, tokens);
+
+    if (!resultadoBusca.ok) {
+      return {
+        sucesso: false,
         hasRecords: false,
-        statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
-        mensagem: 'Nada Consta nos registros de antecedentes da Polícia Civil de Alagoas.',
-        rawSnippet: resultadoTexto.slice(0, 300)
+        statusTexto: 'FALHA NA REQUISIÇÃO API PCAL',
+        mensagem: `A API da PCAL retornou status ${resultadoBusca.status}: ${JSON.stringify(resultadoBusca.data || resultadoBusca.error)}`
       };
     }
 
+    const apiResult = resultadoBusca.data || {};
+    const temRegistros = apiResult.hasRecords || apiResult.possuiRegistros || false;
+    const mensagemRetorno = apiResult.mensagem || apiResult.message || 'Consulta processada com sucesso pela PCAL.';
+
     return {
       sucesso: true,
-      hasRecords: false,
-      statusTexto: 'SOLICITAÇÃO PROCESSADA',
-      mensagem: 'Consulta executada no portal da PCAL.',
-      rawSnippet: resultadoTexto.slice(0, 300)
+      hasRecords: temRegistros,
+      riskLevel: temRegistros ? 'HIGH' : 'LOW',
+      statusTexto: temRegistros ? 'REGISTRO LOCALIZADO' : 'CERTIDÃO NEGATIVA EMITIDA',
+      mensagem: mensagemRetorno,
+      rawSnippet: JSON.stringify(apiResult).slice(0, 300)
     };
 
   } catch (error) {
-    console.error(`[PCAL] Erro na execução:`, error.message);
+    console.error(`[PCAL] Erro crítico na execução:`, error.message);
     return {
       sucesso: false,
       hasRecords: false,
@@ -120,6 +181,7 @@ export async function consultarAntecedentesPCAL(payload) {
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
+      console.log(`[PCAL] Navegador encerrado com sucesso.`);
     }
   }
 }
