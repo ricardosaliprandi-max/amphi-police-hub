@@ -1,8 +1,8 @@
 import puppeteer from 'puppeteer';
 
 export async function consultarAntecedentesPCPB(dados) {
-  const URL_ALVO = 'https://antecedentes.ssp.pb.gov.br/';
-
+  const URL_ALVO = 'https://antecedentes.pc.pb.gov.br/EmitirAAC';
+  
   const browser = await puppeteer.launch({
     headless: 'new',
     args: [
@@ -13,15 +13,30 @@ export async function consultarAntecedentesPCPB(dados) {
       '--no-first-run',
       '--no-zygote',
       '--single-process', // Essencial para gerir o limite rígido de 512MB de RAM no Render
-      '--disable-gpu'
+      '--disable-gpu',
+      '--disable-infobars',
+      '--window-size=1280,800',
+      '--disable-blink-features=AutomationControlled'
     ]
   });
 
   try {
     const page = await browser.newPage();
+    
+    // Camuflagem rigorosa anti-bot / WAF
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    });
+
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => false });
+      Object.defineProperty(navigator, 'languages', { get: () => ['pt-BR', 'pt', 'en-US', 'en'] });
+    });
+
     await page.setViewport({ width: 1280, height: 800 });
 
-    // Interceptação rigorosa: bloqueia imagens, estilos, fontes e mídia para economizar RAM
+    // Interceptação defensiva de recursos estáticos para economizar RAM no Render
     await page.setRequestInterception(true);
     page.on('request', (req) => {
       const resourceType = req.resourceType();
@@ -32,113 +47,155 @@ export async function consultarAntecedentesPCPB(dados) {
       }
     });
 
-    console.log(`[PCPB] Acessando portal da PCPB (Vsoft iDSPS) para: ${dados.nome}`);
+    console.log(`[PCPB] Acessando portal da Paraíba para colher tokens: ${dados.candidateName || dados.nome}`);
     
-    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 25000 }).catch(err => {
-      throw new Error(`Portal da Paraíba inacessível ou fora do ar (DNS/Timeout): ${err.message}`);
+    await page.goto(URL_ALVO, { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(err => {
+      throw new Error(`Falha de conexão com o portal da PCPB: ${err.message}`);
     });
 
-    await page.waitForSelector('form, input', { timeout: 15000 }).catch(() => {});
+    // Aguarda o formulário principal carregar
+    await page.waitForSelector('#form', { timeout: 20000 }).catch(() => {
+      throw new Error('O formulário principal (#form) não foi renderizado no portal da PCPB.');
+    });
 
-    async function preencherCampo(seletorPadrao, seletoresAlternativos, valor) {
-      if (!valor) return;
-      const todos = [seletorPadrao, ...seletoresAlternativos];
-      for (const sel of todos) {
-        try {
-          const el = await page.$(sel);
-          if (el) {
-            await page.focus(sel);
-            await page.evaluate(s => document.querySelector(s).value = '', sel);
-            await page.type(sel, String(valor), { delay: 30 });
-            return true;
-          }
-        } catch (e) {
-          // Tenta o próximo
-        }
-      }
-      return false;
+    // 1. Extração dos Tokens de Segurança do DOM (Anti-CSRF e Internal Key) e Cookies da Sessão
+    const sessionData = await page.evaluate(() => {
+      const csrfEl = document.querySelector('input[name="__RequestVerificationToken"]');
+      const internalEl = document.querySelector('meta[name="internal-key"]');
+      
+      return {
+        requestVerificationToken: csrfEl ? csrfEl.value : null,
+        internalKey: internalEl ? internalEl.getAttribute('content') : null
+      };
+    });
+
+    const cookies = await page.cookies();
+    const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+
+    if (!sessionData.requestVerificationToken || !sessionData.internalKey) {
+      throw new Error('Não foi possível extrair os tokens de segurança (__RequestVerificationToken ou internal-key) do portal PCPB.');
     }
 
-    // 1. Preenchimento de RG e Órgão Expedidor
-    const rgLimpo = String(dados.rg || dados.numero || '').replace(/\D/g, '');
-    if (rgLimpo) {
-      await preencherCampo('input[name="rg"]', ['input[id*="rg" i]', 'input[name*="rg" i]'], rgLimpo);
-      await preencherCampo('input[name="orgaoExpedidor"]', ['input[id*="orgao" i]', 'input[name*="orgao" i]'], (dados.orgaoExpedidor || 'SSP').toUpperCase());
-    }
+    console.log('[PCPB] Tokens de segurança e cookies extraídos com sucesso.');
 
-    // 2. Preenchimento do Nome Completo
-    await preencherCampo('input[name="nome"]', ['input[id*="nome" i]', 'input[name*="nome" i]'], dados.nome.toUpperCase().trim());
+    // 2. Normalização dos dados de entrada
+    const rawCpf = dados.candidateCpf || dados.cpf || '';
+    const rawRg = dados.rg || dados.numero || '';
+    const rawName = dados.candidateName || dados.nome || '';
+    const rawBirth = dados.candidateBirthDate || dados.dataNascimento || '';
+    const rawMother = dados.motherName || dados.nomeMae || '';
+    const rawFather = dados.fatherName || dados.nomePai || '';
+    const rawOrgao = dados.orgaoExpedidor || 'SSP';
 
-    // 3. Data de Nascimento (DD/MM/AAAA)
-    let dataFormatada = dados.dataNascimento || '';
+    const cpfLimpo = String(rawCpf).replace(/\D/g, '');
+    const rgLimpo = String(rawRg).replace(/\D/g, '');
+    
+    let dataFormatada = rawBirth;
     if (/^\d{4}-\d{2}-\d{2}$/.test(dataFormatada)) {
       const [ano, mes, dia] = dataFormatada.split('-');
       dataFormatada = `${dia}/${mes}/${ano}`;
     }
-    await preencherCampo('input[name="dataNascimento"]', ['input[id*="nascimento" i]', 'input[name*="nasc" i]'], dataFormatada);
 
-    // 4. Preenchimento do CPF
-    const cpfLimpo = String(dados.cpf || '').replace(/\D/g, '');
-    await preencherCampo('input[name="cpf"]', ['input[id*="cpf" i]', 'input[name*="cpf" i]'], cpfLimpo);
+    // Endpoint oficial derivado da variável _UrlAPI descoberta no HTML do portal da PCPB
+    const apiUrlReal = 'https://app.sesds.pb.gov.br/Vsoft.iDSps.API/api/antecedentes/emitir';
 
-    // 5. Filiação (Mãe e Pai)
-    if (dados.nomeMae) {
-      await preencherCampo('input[name="mae"]', ['input[id*="mae" i]', 'input[name*="filiacao1" i]'], dados.nomeMae.toUpperCase().trim());
-    }
-    if (dados.nomePai && !dados.nomePai.toUpperCase().includes('DECLARADO')) {
-      await preencherCampo('input[name="pai"]', ['input[id*="pai" i]', 'input[name*="filiacao2" i]'], dados.nomePai.toUpperCase().trim());
-    }
+    const payloadApi = {
+      Cpf: cpfLimpo,
+      Rg: rgLimpo,
+      OrgaoExpedidor: rawOrgao.toUpperCase().trim(),
+      Nome: rawName.toUpperCase().trim(),
+      DataNascimento: dataFormatada,
+      NomeMae: rawMother.toUpperCase().trim(),
+      NomePai: rawFather.toUpperCase().trim()
+    };
 
-    // 6. Submissão segura
-    console.log('[PCPB] Clicando no botão Emitir...');
-    const botaoClicado = await page.evaluate(() => {
-      const btn = document.querySelector('button#btEmitir, button[type="submit"], input[type="submit"]');
-      if (btn) {
-        btn.click();
-        return true;
+    // 3. Execução da chamada HTTP protegida diretamente pelo Node.js com proteção contra Cold-Start
+    let respostaApi = null;
+    let tentativasRestantes = 3;
+
+    while (tentativasRestantes > 0) {
+      try {
+        const fetchRes = await fetch(apiUrlReal, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json, text/plain, */*',
+            'X-Requested-With': 'XMLHttpRequest',
+            'RequestVerificationToken': sessionData.requestVerificationToken,
+            'X-Internal-Key': sessionData.internalKey,
+            'Cookie': cookieHeader,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Referer': URL_ALVO
+          },
+          body: JSON.stringify(payloadApi)
+        });
+
+        const responseText = await fetchRes.text();
+
+        // Se retornar HTML, indica possível cold-start / instabilidade do servidor da Paraíba
+        if (responseText.trim().startsWith('<') || responseText.includes('<!DOCTYPE html>') || responseText.includes('Service Unavailable')) {
+          tentativasRestantes--;
+          if (tentativasRestantes > 0) {
+            console.warn(`[PCPB] Servidor retornou HTML (Cold-Start). Tentando novamente em 3s... (${tentativasRestantes} tentativas restantes)`);
+            await new Promise(r => setTimeout(r, 3000));
+            continue;
+          }
+          return {
+            sucesso: false,
+            hasRecords: false,
+            statusTexto: 'SERVIÇO PCPB INSTÁVEL / COLD-START',
+            mensagem: 'O servidor da Paraíba retornou uma página HTML genérica em vez de dados.',
+            rawSnippet: responseText.slice(0, 200)
+          };
+        }
+
+        let jsonParse;
+        try {
+          jsonParse = JSON.parse(responseText);
+        } catch (e) {
+          jsonParse = { rawText: responseText };
+        }
+
+        respostaApi = {
+          status: fetchRes.status,
+          ok: fetchRes.ok,
+          data: jsonParse
+        };
+        break;
+
+      } catch (netErr) {
+        tentativasRestantes--;
+        if (tentativasRestantes === 0) {
+          throw new Error(`Erro de rede ao comunicar com a API da PCPB: ${netErr.message}`);
+        }
+        await new Promise(r => setTimeout(r, 2000));
       }
-      return false;
-    });
-
-    if (!botaoClicado) {
-      await page.keyboard.press('Enter');
     }
 
-    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => null);
-    await new Promise(r => setTimeout(r, 4000));
-
-    const resultadoTexto = await page.evaluate(() => document.body.innerText || '');
-
-    if (resultadoTexto.toUpperCase().includes('NADA CONSTA') || resultadoTexto.toUpperCase().includes('CERTIDÃO NEGATIVA')) {
+    if (!respostaApi || !respostaApi.ok) {
       return {
-        sucesso: true,
+        sucesso: false,
         hasRecords: false,
-        statusTexto: 'CERTIDÃO NEGATIVA EMITIDA',
-        mensagem: 'Nada Consta nos antecedentes criminais da Polícia Civil da Paraíba.',
-        rawSnippet: resultadoTexto.slice(0, 300)
+        statusTexto: 'FALHA NA REQUISIÇÃO API PCPB',
+        mensagem: `A API da PCPB retornou status ${respostaApi?.status || 500}: ${JSON.stringify(respostaApi?.data || 'Erro desconhecido')}`
       };
     }
 
-    if (resultadoTexto.toUpperCase().includes('EXISTEM REGISTROS') || resultadoTexto.toUpperCase().includes('APONTAMENTO')) {
-      return {
-        sucesso: true,
-        hasRecords: true,
-        riskLevel: 'HIGH',
-        statusTexto: 'REGISTRO LOCALIZADO',
-        mensagem: 'Identificado registro de antecedentes na base da PCPB.'
-      };
-    }
+    const apiResult = respostaApi.data || {};
+    const temRegistros = apiResult.hasRecords || apiResult.possuiRegistros || false;
+    const mensagemRetorno = apiResult.mensagem || apiResult.message || 'Consulta processada com sucesso pela PCPB.';
 
     return {
       sucesso: true,
-      hasRecords: false,
-      statusTexto: 'SOLICITAÇÃO PROCESSADA',
-      mensagem: 'Consulta executada no sistema da PCPB.',
-      rawSnippet: resultadoTexto.slice(0, 300)
+      hasRecords: temRegistros,
+      riskLevel: temRegistros ? 'HIGH' : 'LOW',
+      statusTexto: temRegistros ? 'REGISTRO LOCALIZADO' : 'CERTIDÃO NEGATIVA EMITIDA',
+      mensagem: mensagemRetorno,
+      rawSnippet: JSON.stringify(apiResult).slice(0, 300)
     };
 
   } catch (error) {
-    console.error(`[PCPB] Erro na execução:`, error.message);
+    console.error(`[PCPB] Erro crítico na execução:`, error.message);
     return {
       sucesso: false,
       hasRecords: false,
